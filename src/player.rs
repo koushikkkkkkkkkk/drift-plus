@@ -637,8 +637,8 @@ pub fn resolve_stream(id: &str, audio: &Audio) -> Result<String, String> {
     with_routes(audio, |route| resolve_once(id, audio, route))
 }
 
-/* Plain https audio first: mpv starts on it sooner than on an HLS playlist. */
-const STREAM_FORMAT: &str = "bestaudio[protocol^=http]/bestaudio/best";
+/* The best audio YouTube offers for the song, whatever the container. */
+const STREAM_FORMAT: &str = "bestaudio/best";
 
 fn resolve_once(id: &str, audio: &Audio, route: Route) -> Result<String, String> {
     let mut cmd = ytdlp(audio, route);

@@ -704,8 +704,22 @@ pub fn playlist_title(id: &str, cookies: Option<&str>) -> Option<String> {
         .map(str::to_string)
 }
 
-/// The playlists in the signed-in account's library, as `(id, title)`.
+/// The playlists in the signed-in account's library, as `(id, title)`, with
+/// Liked Music always among them.
 pub fn library(cookies: &str) -> Result<Vec<(String, String)>, String> {
+    library_listing(cookies).map(with_liked_music)
+}
+
+pub fn with_liked_music(mut found: Vec<(String, String)>) -> Vec<(String, String)> {
+    if !found.iter().any(|(id, _)| id == LIKED_MUSIC) {
+        found.insert(0, (LIKED_MUSIC.to_string(), "Liked Music".to_string()));
+    }
+    found
+}
+
+/// Exactly what the account's playlist page lists; empty when the browser
+/// isn't signed in.
+pub fn library_listing(cookies: &str) -> Result<Vec<(String, String)>, String> {
     let mut cmd = ytdlp_base(Some(cookies));
     cmd.args([
         "--flat-playlist",
@@ -720,7 +734,7 @@ pub fn library(cookies: &str) -> Result<Vec<(String, String)>, String> {
     let out = crate::sys::no_window(&mut cmd)
         .output()
         .map_err(|e| format!("could not run yt-dlp ({e}); is it installed and on PATH?"))?;
-    let mut found = parse_library_lines(&String::from_utf8_lossy(&out.stdout));
+    let found = parse_library_lines(&String::from_utf8_lossy(&out.stdout));
     if found.is_empty() && !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         let last = stderr
@@ -732,9 +746,6 @@ pub fn library(cookies: &str) -> Result<Vec<(String, String)>, String> {
             "could not read your library: {}",
             crate::player::ytdl_reason(last.trim().trim_start_matches("ERROR: "))
         ));
-    }
-    if !found.iter().any(|(id, _)| id == LIKED_MUSIC) {
-        found.insert(0, (LIKED_MUSIC.to_string(), "Liked Music".to_string()));
     }
     Ok(found)
 }

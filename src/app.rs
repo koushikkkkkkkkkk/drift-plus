@@ -343,6 +343,8 @@ pub struct App {
     last_sync: Instant,
     sync_every: Option<Duration>,
     library: bool,
+    /* whether :sync may look through the browsers for a signed-in one */
+    find_browser: bool,
     sync_warned: bool,
     audio: Audio,
     result_cursor: Option<usize>,
@@ -472,6 +474,7 @@ impl App {
             last_sync: Instant::now(),
             sync_every: yt.sync_interval().filter(|_| !cfg!(test)),
             library: yt.library,
+            find_browser: !cfg!(test),
             sync_warned: false,
             audio: cfg.audio.clone(),
             result_cursor: None,
@@ -517,7 +520,16 @@ impl App {
         }
         match warning {
             Some(w) => app.error(w),
+            None if app.links.is_empty() && app.links.browser.is_none() => app.info(
+                "Hello! Press / to search, ? for help, and type :sync to bring in your YouTube Music playlists",
+            ),
             None => app.info("Hello! Press / to search, and ? for help"),
+        }
+        /* the browser an earlier :sync settled on stands in for the config */
+        if app.audio.cookie_source().is_none() {
+            if let Some(browser) = app.links.browser.clone() {
+                app.audio.cookies_from_browser = browser;
+            }
         }
         if yt.sync && !cfg!(test) {
             app.start_sync(false);
@@ -1569,7 +1581,9 @@ impl App {
             Command::Lyrics => self.lyrics_panel = !self.lyrics_panel,
             Command::Link(url, name) => self.start_link(url, name),
             Command::Unlink(name) => self.unlink(&name),
-            Command::SyncNow => self.start_sync(true),
+            Command::Sync(None) => self.start_sync(true),
+            Command::Sync(Some(arg)) => self.sync_with_arg(arg),
+            Command::Logout => self.logout(),
             Command::Autoplay(on) => {
                 self.autoplay = on.unwrap_or(!self.autoplay);
                 if !self.autoplay {
@@ -2816,29 +2830,82 @@ impl App {
             return;
         }
         self.last_sync = Instant::now();
-        let cookies = self.audio.cookie_source();
-        let library = self.library && cookies.is_some();
+        let account = match self.audio.cookie_source() {
+            Some(source) => sync::Account::Use(source),
+            /* asked for by hand with no account known yet: go and find one */
+            None if manual && self.find_browser => sync::Account::Detect(
+                sync::browser_candidates(dirs::home_dir().as_deref()),
+            ),
+            None => sync::Account::None,
+        };
+        let finding = matches!(account, sync::Account::Detect(_));
+        let library = finding || (self.library && !matches!(account, sync::Account::None));
         if self.links.is_empty() && !library {
             if manual {
                 self.error(
-                    "Nothing to sync yet \u{2014} :link <playlist URL>, or set cookies_from_browser to sync your library",
+                    "Nothing to sync yet \u{2014} :sync <browser> for your library, or :sync <playlist URL>",
                 );
             }
             return;
         }
         self.syncing = true;
-        if manual {
+        if finding {
+            self.info("Looking for a browser signed in to YouTube Music\u{2026}");
+        } else if manual {
             self.info("Syncing playlists with YouTube Music\u{2026}");
         }
         let (links, taken, tx) = (self.links.clone(), self.unlinked_names(), self.tx.clone());
         std::thread::spawn(move || {
-            let report = sync::run(links, taken, cookies, library);
+            let report = sync::run(links, taken, account, library);
             let _ = tx.send(AppEvent::Synced { manual, report });
         });
     }
 
+    /* `:sync <something>`: a playlist URL is linked, anything else names the
+     * browser whose YouTube account is used from now on. */
+    fn sync_with_arg(&mut self, arg: String) {
+        let looks_like_url = arg.contains("://") || arg.contains("list=") || arg.contains('/');
+        if looks_like_url && ytmusic::playlist_id(&arg).is_some() {
+            return self.start_link(arg, None);
+        }
+        if self.syncing {
+            return self.info("Already syncing\u{2026}");
+        }
+        self.use_browser(arg);
+        self.start_sync(true);
+    }
+
+    fn use_browser(&mut self, browser: String) {
+        self.audio.cookies_from_browser = browser.clone();
+        if self.links.browser.as_deref() != Some(browser.as_str()) {
+            self.links.browser = Some(browser);
+            self.save_links();
+        }
+    }
+
+    fn logout(&mut self) {
+        let Some(browser) = self.links.browser.take() else {
+            return self.info(match self.audio.cookie_source() {
+                Some(_) => "The account comes from config.toml (cookies_from_browser / cookies_file); remove it there",
+                None => "No browser account is in use",
+            });
+        };
+        if self.audio.cookies_from_browser == browser {
+            self.audio.cookies_from_browser.clear();
+        }
+        self.save_links();
+        self.info(format!(
+            "No longer using {} \u{2014} linked playlists stay",
+            sync::browser_label(&browser)
+        ));
+    }
+
     fn on_synced(&mut self, manual: bool, report: sync::Report) {
         self.syncing = false;
+        let via = report.detected.as_deref().map(sync::browser_label);
+        if let Some(browser) = report.detected.clone() {
+            self.use_browser(browser);
+        }
         /* take over the library playlists found during this pass */
         let mut linked = false;
         for (name, id) in &report.links.links {
@@ -2887,13 +2954,19 @@ impl App {
         match problem {
             Some(e) if !quiet => {
                 self.sync_warned = true;
-                self.error(format!(
-                    "Sync problem: {e} ({synced} synced, {failed} failed)"
-                ));
+                self.error(match synced + failed {
+                    0 => e,
+                    _ => format!("Sync problem: {e} ({synced} synced, {failed} failed)"),
+                });
             }
-            _ if manual || updated > 0 => self.info(format!(
-                "Synced {synced} playlists with YouTube Music ({updated} updated, {added} new)"
-            )),
+            _ if manual || updated > 0 => self.info(match via {
+                Some(browser) => format!(
+                    "Signed in through {browser} \u{2014} synced {synced} playlists ({added} new); they stay up to date from now on"
+                ),
+                None => format!(
+                    "Synced {synced} playlists with YouTube Music ({updated} updated, {added} new)"
+                ),
+            }),
             _ => {}
         }
     }
@@ -3987,6 +4060,7 @@ mod tests {
                     .map(|(name, result)| (name.to_string(), result))
                     .collect(),
                 library_error: library_error.map(str::to_string),
+                detected: None,
             }
         };
         let (a, b, c) = (

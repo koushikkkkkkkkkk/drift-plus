@@ -1508,7 +1508,12 @@ const CMD_INFO: &[(&str, &str)] = &[
         "keep a YouTube Music playlist in sync  ·  link URL [name]",
     ),
     ("unlink", "stop syncing a playlist (its songs stay)"),
-    ("sync", "refresh linked playlists and your library now"),
+    (
+        "sync",
+        "bring in your YouTube Music playlists  ·  sync [browser | URL]",
+    ),
+    ("login", "same as sync: use the account of a browser"),
+    ("logout", "stop using your browser's YouTube account"),
     ("autoplay", "keep playing similar songs  ·  on | off"),
     ("help", "show key bindings"),
 ];

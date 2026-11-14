@@ -55,7 +55,9 @@ pub enum Command {
     Lyrics,
     Link(String, Option<String>),
     Unlink(String),
-    SyncNow,
+    /* nothing, a browser name, or a playlist URL */
+    Sync(Option<String>),
+    Logout,
     Autoplay(Option<bool>),
     Help,
 }
@@ -101,6 +103,8 @@ pub const COMMAND_NAMES: &[&str] = &[
     "link",
     "unlink",
     "sync",
+    "login",
+    "logout",
     "autoplay",
     "help",
 ];
@@ -243,7 +247,8 @@ pub fn parse(line: &str) -> Result<Option<Command>, String> {
             )
         }
         "unlink" | "unfollow" => Unlink(name_arg(arg, "unlink")?),
-        "sync" => SyncNow,
+        "sync" | "login" => Sync(Some(unquote(arg).to_string()).filter(|a| !a.is_empty())),
+        "logout" => Logout,
         "autoplay" | "auto" => Autoplay(match arg.to_ascii_lowercase().as_str() {
             "" | "toggle" => None,
             "on" | "yes" | "true" | "1" => Some(true),
@@ -368,7 +373,16 @@ mod tests {
             Ok(Some(Command::Unlink("Road trip".into())))
         );
         assert!(parse("unlink").is_err());
-        assert_eq!(parse("sync"), Ok(Some(Command::SyncNow)));
+        assert_eq!(parse("sync"), Ok(Some(Command::Sync(None))));
+        assert_eq!(
+            parse("sync firefox"),
+            Ok(Some(Command::Sync(Some("firefox".into()))))
+        );
+        assert_eq!(
+            parse("login brave"),
+            Ok(Some(Command::Sync(Some("brave".into()))))
+        );
+        assert_eq!(parse("logout"), Ok(Some(Command::Logout)));
         assert_eq!(parse("autoplay"), Ok(Some(Command::Autoplay(None))));
         assert_eq!(parse("autoplay ON"), Ok(Some(Command::Autoplay(Some(true)))));
         assert_eq!(parse("auto off"), Ok(Some(Command::Autoplay(Some(false)))));

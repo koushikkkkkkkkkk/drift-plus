@@ -183,7 +183,8 @@ Press `:` to open the command line. Most commands have short aliases (`:vol`, `:
 | `:import URL` | import a YouTube / YouTube Music playlist |
 | `:link URL [name]` | save a YouTube / YouTube Music playlist and keep it in sync |
 | `:unlink name` | stop syncing a playlist (its songs stay) |
-| `:sync` | refresh linked playlists and your library now |
+| `:sync [browser or URL]` | bring in your YouTube Music playlists and keep them up to date (also `:login`) |
+| `:logout` | stop using the browser's YouTube account |
 | `:autoplay [on\|off]` | continue with similar songs when everything has played |
 | `:album [query]` | open the selected song's album, or search albums |
 | `:playlist query` | search YouTube Music playlists |
@@ -216,18 +217,20 @@ Artwork comes from YouTube thumbnails and is only fetched when a cover view is o
 
 ## Synced playlists
 
-A linked playlist is a normal playlist in the Playlists tab (marked `↻`) whose songs are re-read from YouTube, so anything you add or remove in YouTube Music shows up here.
+Type `:sync`. That is the whole setup.
 
 ```
-:link https://music.youtube.com/playlist?list=PL...            # named after the playlist
-:link https://music.youtube.com/playlist?list=PL... Road trip   # or pick a name
-:sync                                                           # refresh everything now
-:unlink Road trip                                               # keep the songs, stop syncing
+:sync                                              # find your browser, bring in your playlists and Liked Music
+:sync firefox                                      # use this browser's account instead of searching
+:sync https://music.youtube.com/playlist?list=PL...   # follow one playlist, no account needed
+:logout                                            # stop using the browser account
 ```
 
-Linked playlists are refreshed when drift starts, every `sync_minutes` (30 by default) while it runs, and on `:sync`.
+The first `:sync` looks through your browsers (Firefox, Chrome, Chromium, Brave, Edge, Vivaldi, Opera, and Zen, LibreWolf, Floorp or Waterfox when installed) for one that is signed in to YouTube Music. It then links every playlist in your library plus Liked Music, and remembers the browser. From then on everything is refreshed when drift-plus starts, every `sync_minutes` (30 by default) while it runs, and whenever you type `:sync`. Playlists you create later appear by themselves.
 
-**Your own library.** Public and unlisted playlists need no account. To follow your private playlists and Liked Music, set `cookies_from_browser` under `[audio]` to a browser where you are signed in to YouTube Music (for example `"firefox"`). On the next sync drift links every playlist in your library by itself, and new playlists you create later appear after the following sync. Set `library = false` under `[youtube]` to link playlists only by hand.
+If no signed-in browser is found, open music.youtube.com in your browser, sign in, and run `:sync` again. Chromium-based browsers may need to be closed while their cookies are read. `:login` is another name for `:sync`.
+
+A synced playlist is a normal playlist in the Playlists tab (marked `↻`). `:link URL [name]` follows a playlist under a name you choose and `:unlink name` stops following one while keeping its songs. Setting `cookies_from_browser` or `cookies_file` under `[audio]` still works and takes precedence over the remembered browser; `library = false` under `[youtube]` links playlists only by hand.
 
 Things to know:
 
@@ -256,13 +259,17 @@ Things you can change under `[audio]`:
 
 An old yt-dlp is the most common cause of both this error and "HTTP error 403", so update it first (`yt-dlp -U`, or your package manager).
 
+## Sound quality
+
+drift-plus always asks yt-dlp for the best audio stream YouTube offers for the song (`bestaudio`), which is normally Opus at about 160 kbit/s, and mpv plays it without re-encoding. YouTube Music Premium accounts get 256 kbit/s, but only when songs are looked up with the account: run `:sync` once so the browser is known, and set `stream_cookies = true` under `[audio]`.
+
 ## Faster playback
 
 Most of the wait before a song starts is yt-dlp working out the stream address. drift-plus does that ahead of time:
 
 - While a song plays, the streams of the next two in the queue or list are looked up, so moving on is immediate. This is skipped with shuffle on, since the next song isn't known.
 - When the cursor rests on a song for about a second, its stream is looked up too, and mpv is started in the background, so `Enter` plays it right away.
-- Plain https audio is asked for before HLS, which mpv opens sooner, and the way past [YouTube's bot check](#youtubes-bot-check) that worked is used first, so no time goes into attempts that are known to fail.
+- The way past [YouTube's bot check](#youtubes-bot-check) that worked is used first, so no time goes into attempts that are known to fail.
 - Looked-up streams are remembered for five hours. If one has expired by the time it's played, it's looked up again without counting as a failed song.
 
 drift-plus plays through mpv with a stream address from yt-dlp, while [cliamp](https://github.com/bjarneo/cliamp) pipes yt-dlp straight into its own decoder; in both, yt-dlp's lookup is the slow part, which is why it is moved out of the way here. The first song after starting drift-plus, or a song you play before the lookup finishes, still takes as long as yt-dlp needs. Both lookups can be turned off with `prewarm` and `prewarm_selected` under `[youtube]`; the second one runs yt-dlp more often than plain playback would. For no waiting at all on a slow connection, `download = true` under `[audio]` caches songs on disk and fetches the next one in the background.
