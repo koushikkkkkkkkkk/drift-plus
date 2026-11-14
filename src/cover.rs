@@ -71,19 +71,23 @@ pub fn supports_protocol(protocol: ProtocolType) -> bool {
     matches!(protocol, ProtocolType::Kitty | ProtocolType::Iterm2)
 }
 
-/// Use the same track artwork as Discord, with a small decoded image kept in memory.
-pub fn fetch(id: &str) -> Option<RgbImage> {
-    if !is_valid_id(id) {
-        return None;
-    }
-    let response = ureq::get(&format!("https://i.ytimg.com/vi/{id}/hqdefault.jpg"))
+/* Largest first: 1280x720, then 640x480, then 480x360. Not every song has
+ * the two bigger ones; YouTube answers 404 for those and the next is tried. */
+const THUMBNAILS: [&str; 3] = ["maxresdefault", "sddefault", "hqdefault"];
+
+fn thumbnail_url(id: &str, name: &str) -> String {
+    format!("https://i.ytimg.com/vi/{id}/{name}.jpg")
+}
+
+fn download(url: &str) -> Option<DynamicImage> {
+    let response = ureq::get(url)
         .timeout(Duration::from_secs(10))
         .call()
         .ok()?;
     let mut bytes = Vec::new();
     response
         .into_reader()
-        .take(2 * 1024 * 1024)
+        .take(4 * 1024 * 1024)
         .read_to_end(&mut bytes)
         .ok()?;
     let mut reader =
@@ -92,12 +96,32 @@ pub fn fetch(id: &str) -> Option<RgbImage> {
     limits.max_image_width = Some(4096);
     limits.max_image_height = Some(4096);
     reader.limits(limits);
-    Some(square_cover(reader.decode().ok()?))
+    reader.decode().ok()
+}
+
+/// The sharpest artwork YouTube has for the track, as a square cover.
+pub fn fetch(id: &str) -> Option<RgbImage> {
+    if !is_valid_id(id) {
+        return None;
+    }
+    THUMBNAILS
+        .iter()
+        .find_map(|name| download(&thumbnail_url(id, name)))
+        .map(square_cover)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn asks_for_the_largest_artwork_first() {
+        assert_eq!(
+            thumbnail_url("dQw4w9WgXcQ", THUMBNAILS[0]),
+            "https://i.ytimg.com/vi/dQw4w9WgXcQ/maxresdefault.jpg"
+        );
+        assert_eq!(THUMBNAILS.last(), Some(&"hqdefault"));
+    }
 
     #[test]
     fn requires_a_real_image_protocol() {

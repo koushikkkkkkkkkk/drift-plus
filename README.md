@@ -212,7 +212,7 @@ All fullscreen views keep playback controls available: `Space` to pause or resum
 
 Lyrics come from [LRCLIB](https://lrclib.net) and are only fetched while a lyrics or cover view is open.
 
-Artwork comes from YouTube thumbnails and is only fetched when a cover view is open. Drift trims black bars and crops and resizes the image to 1000 × 1000 pixels. Terminals detected as supporting the Kitty or iTerm2 graphics protocol show the image directly; other terminals use colored half blocks for a rough preview. The cover is hidden in very short windows to leave room for track details.
+Artwork comes from YouTube thumbnails and is only fetched when a cover view is open. The largest thumbnail YouTube has for the song is used (up to 1280 × 720), falling back to smaller ones. Drift trims black bars and crops and resizes the image to 1000 × 1000 pixels. Terminals detected as supporting the Kitty or iTerm2 graphics protocol show the image directly; other terminals use colored half blocks for a rough preview. The cover is hidden in very short windows to leave room for track details.
 
 ## Synced playlists
 
