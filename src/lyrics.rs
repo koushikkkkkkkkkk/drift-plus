@@ -5,7 +5,7 @@ use serde_json::Value;
 use crate::model::{parse_clock, Track};
 
 const SEARCH: &str = "https://lrclib.net/api/search";
-const UA: &str = concat!("drift/", env!("CARGO_PKG_VERSION"));
+const UA: &str = concat!("drift-plus/", env!("CARGO_PKG_VERSION"));
 const LEAD: f64 = 0.25;
 const MAX_DRIFT: f64 = 8.0;
 

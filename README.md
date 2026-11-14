@@ -11,7 +11,7 @@ tighter YouTube Music integration.
 - **A cover art view.** `F` now cycles lyrics → cover art → cover art and lyrics → player.
 - **Faster starts.** The stream of the next song is looked up while the current one plays, and the song under the cursor is looked up after the cursor rests on it, so the wait for yt-dlp mostly disappears. See [Faster playback](#faster-playback).
 
-The program, config directory and commands are still called `drift`, so it is a drop-in replacement.
+The program is called `drift-plus` and keeps its own settings (`~/.config/drift-plus/`), cache and session, so it installs next to the original `drift` without touching it. On its first run it starts from a copy of drift's `config.toml` and playlists if you have them.
 
 ---
 
@@ -56,7 +56,7 @@ The program, config directory and commands are still called `drift`, so it is a 
 
 ## Installation
 
-Drift needs [mpv](https://mpv.io/) for playback and [yt-dlp](https://github.com/yt-dlp/yt-dlp) to get the audio streams. Run `drift --check` at any time to see if both are installed.
+Drift needs [mpv](https://mpv.io/) for playback and [yt-dlp](https://github.com/yt-dlp/yt-dlp) to get the audio streams. Run `drift-plus --check` at any time to see if both are installed.
 
 ### Arch Linux (AUR)
 
@@ -96,7 +96,7 @@ cd drift-plus
 cargo install --path .
 ```
 
-This puts `drift` in `~/.cargo/bin/`, which is on your `$PATH` if you installed Rust with rustup.
+This puts `drift-plus` in `~/.cargo/bin/`, which is on your `$PATH` if you installed Rust with rustup.
 
 ### Nix
 
@@ -118,11 +118,11 @@ nix run github:koushikkkkkkkkkk/drift-plus
 ## Usage
 
 ```bash
-drift                    # start the player
-drift "daft punk"        # start with a search
-drift --check            # check that mpv and yt-dlp are installed
-drift --help
-drift --version
+drift-plus                    # start the player
+drift-plus "daft punk"        # start with a search
+drift-plus --check            # check that mpv and yt-dlp are installed
+drift-plus --help
+drift-plus --version
 ```
 
 Press `/` to search, `Enter` to play, `a` to add a song to the queue and `?` for the full list of keybinds. Inside the player, `:help` lists the commands.
@@ -237,19 +237,39 @@ Things to know:
 - If a refresh fails (offline, playlist made private), the songs already saved are kept.
 - The queue is a copy: a sync does not change what is already queued.
 
+## YouTube's bot check
+
+YouTube sometimes refuses a song with "Sign in to confirm you're not a bot". drift-plus works around it the way [ytm-player](https://github.com/peternaame-boop/ytm-player) does, by trying several ways in, one after the other:
+
+1. Without an account, with yt-dlp's default player clients. Songs are looked up this way even when cookies are configured, because signed-in lookups are the ones YouTube challenges most.
+2. Without an account, with the `android` player client added (`player_client=default,android`).
+3. With your cookies, if `cookies_from_browser` or `cookies_file` is set under `[audio]`.
+
+The way that worked is tried first for the following songs, so a block costs time only once. If every way is refused, the error says what to do next.
+
+Things you can change under `[audio]`:
+
+- `cookies_from_browser = "firefox"` or `cookies_file = "~/cookies.txt"` adds the third step and lets drift-plus read your library.
+- `stream_cookies = true` puts your account first (Premium quality, private or age-restricted songs). yt-dlp then needs its JavaScript challenge solver: install `deno`, and either `yt-dlp-ejs` or add `ytdlp_args = ["--remote-components", "ejs:github"]`.
+- `player_client` sets the player clients of the first step.
+- `ytdlp_args` adds any other yt-dlp arguments, for example a proxy.
+
+An old yt-dlp is the most common cause of both this error and "HTTP error 403", so update it first (`yt-dlp -U`, or your package manager).
+
 ## Faster playback
 
 Most of the wait before a song starts is yt-dlp working out the stream address. drift-plus does that ahead of time:
 
-- While a song plays, the stream of the next one in the queue or list is looked up, so moving on is immediate. This is skipped with shuffle on, since the next song isn't known.
+- While a song plays, the streams of the next two in the queue or list are looked up, so moving on is immediate. This is skipped with shuffle on, since the next song isn't known.
 - When the cursor rests on a song for about a second, its stream is looked up too, and mpv is started in the background, so `Enter` plays it right away.
-- Looked-up streams are remembered for three hours. If one has expired by the time it's played, it's looked up again without counting as a failed song.
+- Plain https audio is asked for before HLS, which mpv opens sooner, and the way past [YouTube's bot check](#youtubes-bot-check) that worked is used first, so no time goes into attempts that are known to fail.
+- Looked-up streams are remembered for five hours. If one has expired by the time it's played, it's looked up again without counting as a failed song.
 
-The first song after starting drift, or a song you play before the lookup finishes, still takes as long as yt-dlp needs. Both lookups can be turned off with `prewarm` and `prewarm_selected` under `[youtube]`; the second one runs yt-dlp more often than plain playback would. For no waiting at all on a slow connection, `download = true` under `[audio]` caches songs on disk and fetches the next one in the background.
+drift-plus plays through mpv with a stream address from yt-dlp, while [cliamp](https://github.com/bjarneo/cliamp) pipes yt-dlp straight into its own decoder; in both, yt-dlp's lookup is the slow part, which is why it is moved out of the way here. The first song after starting drift-plus, or a song you play before the lookup finishes, still takes as long as yt-dlp needs. Both lookups can be turned off with `prewarm` and `prewarm_selected` under `[youtube]`; the second one runs yt-dlp more often than plain playback would. For no waiting at all on a slow connection, `download = true` under `[audio]` caches songs on disk and fetches the next one in the background.
 
 ## Configuration
 
-Settings live in `config.toml` inside Drift's config directory (`~/.config/drift/` on Linux). Drift only reads the file and never rewrites it, so your comments are safe. Restart Drift after editing.
+Settings live in `config.toml` inside Drift's config directory (`~/.config/drift-plus/` on Linux). Drift only reads the file and never rewrites it, so your comments are safe. Restart Drift after editing.
 
 ```toml
 [playback]
@@ -273,8 +293,12 @@ client_id = ""        # set this to enable Discord rich presence
 [audio]
 download = false              # false: stream songs; true: download to the cache first
 download_max_minutes = 15     # with download = true, longer songs are still streamed (0 = no limit)
-download_dir = "~/Music/drift"
+download_dir = "~/Music/drift-plus"
 cookies_from_browser = ""     # e.g. "firefox" or "chrome"; also what signs you in for library sync
+cookies_file = ""             # or a cookies.txt (Netscape format)
+stream_cookies = false        # true: look songs up with your account first
+player_client = ""            # yt-dlp player clients for the first attempt
+ytdlp_args = []               # extra yt-dlp arguments
 
 [youtube]
 sync = true                   # keep linked playlists up to date
@@ -299,7 +323,7 @@ By default Drift streams songs, so playback starts right away, even for hour-lon
 
 ### Saving songs permanently
 
-Set `download_dir` under `[audio]` in `config.toml` (default: `~/Music/drift`). The directory is created when needed. `~` expands to your home directory; relative paths resolve from the directory where you start Drift. Restart Drift after changing it.
+Set `download_dir` under `[audio]` in `config.toml` (default: `~/Music/drift-plus`). The directory is created when needed. `~` expands to your home directory; relative paths resolve from the directory where you start Drift. Restart Drift after changing it.
 
 - Press `D` to download the current song, including from fullscreen lyrics or cover art.
 - Press `gd` to download the highlighted song without changing playback.
@@ -370,21 +394,21 @@ In the Playlists tab `seek_forward` opens the selected playlist, and `seek_back`
 
 | Variable | What it does |
 | --- | --- |
-| `DRIFT_CONFIG_DIR` | where Drift keeps `config.toml` and your playlists |
-| `DRIFT_STATE_DIR` | where Drift keeps the saved session |
-| `DRIFT_MPV_ARGS` | extra arguments passed to mpv |
+| `DRIFT_PLUS_CONFIG_DIR` | where Drift keeps `config.toml` and your playlists |
+| `DRIFT_PLUS_STATE_DIR` | where Drift keeps the saved session |
+| `DRIFT_PLUS_MPV_ARGS` | extra arguments passed to mpv |
 
 ## Troubleshooting
 
-**Drift says mpv or yt-dlp is missing.** Run `drift --check` to see which one, and install it with the table in [Installing mpv and yt-dlp manually](#installing-mpv-and-yt-dlp-manually).
+**Drift says mpv or yt-dlp is missing.** Run `drift-plus --check` to see which one, and install it with the table in [Installing mpv and yt-dlp manually](#installing-mpv-and-yt-dlp-manually).
 
-**Playback fails with "Sign in to confirm you're not a bot".** YouTube wants a login. Set `cookies_from_browser` under `[audio]` to a browser you're logged into YouTube with (for example `"firefox"`), then restart Drift. Updating yt-dlp also helps, since YouTube changes things often.
+**Playback fails with "Sign in to confirm you're not a bot".** See [YouTube's bot check](#youtubes-bot-check). In short: update yt-dlp first, then set `cookies_from_browser` under `[audio]`.
 
 **The lyrics panel doesn't show up.** It needs a terminal at least 70 columns wide. Make the window wider or use `F` for fullscreen lyrics.
 
 **Cover art looks blocky or is missing.** Press `F` twice from the player to open the cover view, and a third time for the cover next to the lyrics. A blocky preview means Drift couldn't detect Kitty or iTerm2 graphics support in your terminal. If you see "Cover art unavailable", the YouTube thumbnail couldn't be fetched or decoded. In very short windows, make the terminal taller to show the cover.
 
-**`drift: command not found`.** Make sure `~/.cargo/bin` is in your `$PATH`.
+**`drift-plus: command not found`.** Make sure `~/.cargo/bin` is in your `$PATH`.
 
 **`gb` opens the wrong album.** Drift looks albums up by album and artist name, so it can guess wrong, and the song needs album info to begin with. `:album <query>` lets you search for it yourself.
 

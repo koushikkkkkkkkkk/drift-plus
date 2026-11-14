@@ -63,17 +63,17 @@ pub fn write_atomic(path: &Path, text: &str) -> Result<()> {
         .with_context(|| format!("replacing {}", path.display()))
 }
 
-/// Base directory for settings and playlists (`DRIFT_CONFIG_DIR` overrides it).
+/// Base directory for settings and playlists (`DRIFT_PLUS_CONFIG_DIR` overrides it).
 pub fn config_base() -> Option<PathBuf> {
-    std::env::var_os("DRIFT_CONFIG_DIR")
+    std::env::var_os("DRIFT_PLUS_CONFIG_DIR")
         .map(PathBuf::from)
         .or_else(dirs::config_dir)
 }
 
-/// Base directory for the saved session (`DRIFT_STATE_DIR` overrides it).
+/// Base directory for the saved session (`DRIFT_PLUS_STATE_DIR` overrides it).
 /// `dirs::state_dir()` is `None` on Windows and macOS, so fall back to local data.
 pub fn state_base() -> Option<PathBuf> {
-    std::env::var_os("DRIFT_STATE_DIR")
+    std::env::var_os("DRIFT_PLUS_STATE_DIR")
         .map(PathBuf::from)
         .or_else(dirs::state_dir)
         .or_else(dirs::data_local_dir)
@@ -82,10 +82,14 @@ pub fn state_base() -> Option<PathBuf> {
 impl Store {
     pub fn dir() -> Result<PathBuf> {
         let dir = config_base().ok_or_else(|| anyhow!("cannot determine config directory"))?;
-        let new_dir = dir.join("drift");
-        let old_dir = dir.join("ytm-tui");
-        if !new_dir.exists() && old_dir.exists() {
-            let _ = fs::rename(&old_dir, &new_dir);
+        let new_dir = dir.join("drift-plus");
+        /* first run next to an existing drift: start from a copy of its
+         * settings and playlists; drift's own files are left alone */
+        let old_dir = dir.join("drift");
+        if !new_dir.exists() && old_dir.is_dir() && fs::create_dir_all(&new_dir).is_ok() {
+            for name in ["config.toml", "playlists.json"] {
+                let _ = fs::copy(old_dir.join(name), new_dir.join(name));
+            }
         }
         Ok(new_dir)
     }

@@ -10,16 +10,16 @@
         let pkgs = nixpkgs.legacyPackages.${system};
         in {
           default = pkgs.rustPlatform.buildRustPackage {
-            pname = "drift";
+            pname = "drift-plus";
             version = "1.3";
             src = ./.;
             cargoLock.lockFile = ./Cargo.lock;
             nativeBuildInputs = [ pkgs.makeWrapper ];
             postInstall = ''
-              wrapProgram $out/bin/drift \
+              wrapProgram $out/bin/drift-plus \
                 --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.mpv pkgs.yt-dlp ]}
             '';
-            meta.mainProgram = "drift";
+            meta.mainProgram = "drift-plus";
           };
         });
     };

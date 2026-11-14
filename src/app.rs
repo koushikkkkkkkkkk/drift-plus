@@ -85,7 +85,9 @@ pub enum AppEvent {
 }
 
 /* YouTube stream links stay valid for hours; forget them well before that. */
-const STREAM_TTL: Duration = Duration::from_secs(3 * 60 * 60);
+const STREAM_TTL: Duration = Duration::from_secs(5 * 60 * 60);
+/* how many of the coming songs are looked up ahead of time */
+const PREWARM_AHEAD: usize = 2;
 const STREAM_KEEP: usize = 64;
 /* how long the cursor rests on a song before its stream is looked up */
 const HOVER_DWELL: Duration = Duration::from_millis(900);
@@ -525,7 +527,7 @@ impl App {
 
     pub fn shutdown(&mut self) {
         if let Err(e) = self.save_session(true) {
-            eprintln!("drift: could not save session: {e:#}");
+            eprintln!("drift-plus: could not save session: {e:#}");
         }
         self.player = None;
         self.mpris = None;
@@ -2291,6 +2293,11 @@ impl App {
 
     /* What plays after the current song, when that can be known ahead. */
     fn upcoming(&self) -> Option<&Track> {
+        self.upcoming_at(0)
+    }
+
+    /* The song `skip` places after the next one. */
+    fn upcoming_at(&self, skip: usize) -> Option<&Track> {
         if self.shuffle || self.repeat == RepeatMode::One {
             return None;
         }
@@ -2302,12 +2309,12 @@ impl App {
             None => None,
         };
         if let Some(i) = queued {
-            return self.queue.get(i);
+            return self.queue.get(i + skip);
         }
         let cursor = self
             .result_cursor
             .filter(|_| self.on_radio || self.resume_radio || self.autoplay)?;
-        self.radio.get(cursor + 1)
+        self.radio.get(cursor + 1 + skip)
     }
 
     /* Look up a song's stream now so playing it later starts at once. */
@@ -2321,19 +2328,22 @@ impl App {
         if !self.prewarm {
             return;
         }
-        let Some(next) = self.upcoming() else {
-            return;
-        };
-        /* downloaded songs are handled by prefetch_next */
-        if self.audio.should_download(next.duration) {
+        if self.upcoming().is_none() {
             return;
         }
-        let id = next.id.clone();
-        self.prewarm_id(&id);
+        let ids: Vec<String> = (0..PREWARM_AHEAD)
+            .filter_map(|skip| self.upcoming_at(skip))
+            /* downloaded songs are handled by prefetch_next */
+            .filter(|t| !self.audio.should_download(t.duration))
+            .map(|t| t.id.clone())
+            .collect();
+        for id in ids {
+            self.prewarm_id(&id);
+        }
     }
 
     fn prewarm_hover(&mut self) {
-        if !self.prewarm_selected || self.mode != Mode::Normal || self.resolving.len() >= 2 {
+        if !self.prewarm_selected || self.mode != Mode::Normal || self.resolving.len() >= 3 {
             return;
         }
         let Some(track) = self.selected_track() else {
@@ -2806,7 +2816,7 @@ impl App {
             return;
         }
         self.last_sync = Instant::now();
-        let cookies = self.audio.cookies().map(str::to_string);
+        let cookies = self.audio.cookie_source();
         let library = self.library && cookies.is_some();
         if self.links.is_empty() && !library {
             if manual {
@@ -2898,7 +2908,7 @@ impl App {
             return self.info(msg);
         }
         self.busy = Some("Linking playlist".into());
-        let cookies = self.audio.cookies().map(str::to_string);
+        let cookies = self.audio.cookie_source();
         let tx = self.tx.clone();
         std::thread::spawn(move || {
             let cookies = cookies.as_deref();
@@ -4117,8 +4127,8 @@ mod tests {
     fn playlist_drill_in() {
         let dir = std::env::temp_dir().join(format!("drift-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        std::env::set_var("DRIFT_CONFIG_DIR", &dir);
-        std::env::set_var("DRIFT_STATE_DIR", &dir);
+        std::env::set_var("DRIFT_PLUS_CONFIG_DIR", &dir);
+        std::env::set_var("DRIFT_PLUS_STATE_DIR", &dir);
 
         let (tx, _rx) = mpsc::channel();
         let mut app = App::new(tx);
@@ -4172,7 +4182,7 @@ mod tests {
         assert_eq!(app.selected(), 0);
 
         assert_eq!(app.store.playlists.len(), 2);
-        let saved = std::fs::read_to_string(dir.join("drift").join("playlists.json")).unwrap();
+        let saved = std::fs::read_to_string(dir.join("drift-plus").join("playlists.json")).unwrap();
         assert!(saved.contains("aaaaaaaaaaa") && !saved.contains("bbbbbbbbbbb"));
 
         press(&mut app, KeyCode::Char('a'));

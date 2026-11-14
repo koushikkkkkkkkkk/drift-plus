@@ -10,6 +10,9 @@ Changes to drift. Loosely follows [Keep A Changelog](https://keepachangelog.com/
   - `F` now cycles lyrics → cover art → cover art and lyrics → player
   - The next song's stream, and the stream of the song under the cursor, are looked up ahead of time so playback starts sooner
   - New `[youtube]` config section: `sync`, `sync_minutes`, `library`, `prewarm`, `prewarm_selected`
+  - The program, its config, cache and state directories and its environment variables are now named `drift-plus` / `DRIFT_PLUS_*`, so it installs next to drift; drift's config and playlists are copied on the first run
+  - "Sign in to confirm you're not a bot": songs are looked up without an account first, then with the `android` player client, then with cookies; the working way is remembered. New `[audio]` settings `cookies_file`, `stream_cookies`, `player_client`, `ytdlp_args`
+  - The next two songs are looked up ahead, plain https audio is preferred over HLS, and stream addresses are kept for 5 hours
 
 - Download support for saving songs permanently to disk
   - Press `D` to download current song, `gd` for highlighted, `gD` for all in collection

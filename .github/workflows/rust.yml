@@ -27,4 +27,4 @@ jobs:
     - uses: actions/upload-artifact@v7
       with:
         name: drift-plus-linux-x86_64
-        path: target/release/drift
+        path: target/release/drift-plus

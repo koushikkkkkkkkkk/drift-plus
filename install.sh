@@ -67,10 +67,10 @@ for cmd in cargo mpv yt-dlp; do
     fi
 done
 
-echo "-> Installing drift..."
+echo "-> Installing drift-plus..."
 
-cargo install --git https://github.com/socatlolmeow/drift
+cargo install --git https://github.com/koushikkkkkkkkkk/drift-plus
 
 echo "-> Drift installation complete!"
-echo "Run 'drift' to start the application."
+echo "Run 'drift-plus' to start the application."
 echo "If the command is not found, pls check that ~/.cargo/bin is in your PATH"

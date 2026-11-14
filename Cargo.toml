@@ -1,8 +1,9 @@
 [package]
-name = "drift"
+name = "drift-plus"
 version = "1.6.1"
 edition = "2021"
-description = "A Vim-style terminal music player for YouTube Music (no login required)"
+description = "drift-plus: a Vim-style terminal music player for YouTube Music, based on drift"
+repository = "https://github.com/koushikkkkkkkkkk/drift-plus"
 license = "GPL-3.0-or-later"
 
 [workspace]

@@ -92,6 +92,10 @@ pub struct Audio {
     pub download_max_minutes: u32,
     pub download_dir: String,
     pub cookies_from_browser: String,
+    pub cookies_file: String,
+    pub stream_cookies: bool,
+    pub player_client: String,
+    pub ytdlp_args: Vec<String>,
 }
 
 #[cfg(unix)]
@@ -100,8 +104,12 @@ impl Default for Audio {
         Audio {
             download: false,
             download_max_minutes: 15,
-            download_dir: "~/Music/drift".into(),
+            download_dir: "~/Music/drift-plus".into(),
             cookies_from_browser: String::new(),
+            cookies_file: String::new(),
+            stream_cookies: false,
+            player_client: String::new(),
+            ytdlp_args: Vec::new(),
         }
     }
 }
@@ -136,6 +144,26 @@ impl Audio {
     pub fn cookies(&self) -> Option<&str> {
         let c = self.cookies_from_browser.trim();
         (!c.is_empty()).then_some(c)
+    }
+
+    /// A Netscape cookies.txt for yt-dlp's --cookies, if one is set.
+    pub fn cookie_file(&self) -> Option<PathBuf> {
+        let c = self.cookies_file.trim();
+        if c.is_empty() {
+            return None;
+        }
+        Some(match c.strip_prefix("~/").zip(dirs::home_dir()) {
+            Some((rest, home)) => home.join(rest),
+            None => PathBuf::from(c),
+        })
+    }
+
+    /// Where account cookies come from: `file:<path>` or a browser name.
+    pub fn cookie_source(&self) -> Option<String> {
+        match self.cookie_file() {
+            Some(path) => Some(format!("file:{}", path.display())),
+            None => self.cookies().map(str::to_string),
+        }
     }
 
     /// Whether a track should be downloaded to the cache before playing,
@@ -244,8 +272,8 @@ impl Config {
         };
         format!(
             "\
-# Drift settings. Drift only reads this file and never rewrites it, so your
-# comments are safe. Restart drift after editing.
+# drift-plus settings. drift-plus only reads this file and never rewrites it, so your
+# comments are safe. Restart drift-plus after editing.
 
 [playback]
 volume = {volume}
@@ -283,16 +311,31 @@ download = {download}
 # instead of downloaded. 0 means download everything, however long.
 download_max_minutes = {dl_max}
 download_dir = {download_dir}
-# Use your browser's cookies with yt-dlp when YouTube refuses to play something
+# Your browser's cookies: used to read your YouTube Music library, and as a
+# fallback when YouTube refuses to play something without an account
 # (\"Sign in to confirm you're not a bot\", age-restricted songs, ...).
 # Examples: \"firefox\", \"chrome\", \"chromium\", \"brave\", \"edge\",
 # \"firefox:my-profile\". Empty means off. Close the browser if reading fails.
 cookies_from_browser = \"{cookies}\"
+# Or a cookies.txt file (Netscape format) exported from your browser. Used
+# instead of cookies_from_browser when set.
+cookies_file = {cookies_file}
+# false: songs are looked up without your account first (this is what trips
+#        YouTube's bot check least often) and the cookies are only a fallback.
+# true:  look songs up with your account first (Premium quality, private songs).
+stream_cookies = {stream_cookies}
+# yt-dlp player client(s) for the first attempt, e.g. \"default,android\".
+# Empty lets yt-dlp choose. A second attempt with \"default,android\" is made
+# on its own when the first one is refused.
+player_client = {player_client}
+# Extra arguments for every yt-dlp call that looks up or downloads a song,
+# e.g. [\"--remote-components\", \"ejs:github\"] or [\"--proxy\", \"socks5://127.0.0.1:9050\"].
+ytdlp_args = {ytdlp_args}
 
 [youtube]
 # Keep linked playlists (:link <playlist URL>) up to date with YouTube Music.
 sync = true
-# Minutes between refreshes while drift runs. 0 = only at startup and on :sync.
+# Minutes between refreshes while drift-plus runs. 0 = only at startup and on :sync.
 sync_minutes = 30
 # With cookies_from_browser set, also link every playlist in your YouTube Music
 # library (and Liked Music) automatically.
@@ -330,6 +373,16 @@ prewarm_selected = true
             dl_max = au.download_max_minutes,
             download_dir = toml::Value::String(au.download_dir.clone()),
             cookies = au.cookies_from_browser.replace(['\\', '"'], ""),
+            cookies_file = toml::Value::String(au.cookies_file.clone()),
+            stream_cookies = au.stream_cookies,
+            player_client = toml::Value::String(au.player_client.clone()),
+            ytdlp_args = toml::Value::Array(
+                au.ytdlp_args
+                    .iter()
+                    .cloned()
+                    .map(toml::Value::String)
+                    .collect()
+            ),
         )
     }
 
@@ -603,18 +656,18 @@ mod tests {
     #[test]
     fn download_directory_paths() {
         let mut audio = Audio::default();
-        assert_eq!(audio.download_dir, "~/Music/drift");
+        assert_eq!(audio.download_dir, "~/Music/drift-plus");
         let home = dirs::home_dir().unwrap();
         assert_eq!(
             audio.download_directory().unwrap(),
-            home.join("Music/drift")
+            home.join("Music/drift-plus")
         );
         audio.download_dir = "~".into();
         assert_eq!(audio.download_directory().unwrap(), home);
-        audio.download_dir = "~//Music/drift".into();
+        audio.download_dir = "~//Music/drift-plus".into();
         assert_eq!(
             audio.download_directory().unwrap(),
-            home.join("Music/drift")
+            home.join("Music/drift-plus")
         );
         audio.download_dir = "music/downloads".into();
         assert_eq!(
@@ -629,13 +682,13 @@ mod tests {
             assert!(audio.download_directory().is_err(), "{invalid:?}");
         }
         let c: Config = toml::from_str("[audio]\ndownload = true").unwrap();
-        assert_eq!(c.audio.download_dir, "~/Music/drift");
+        assert_eq!(c.audio.download_dir, "~/Music/drift-plus");
     }
 
     #[test]
     fn download_directory_roundtrip() {
         for dir in [
-            "~/Music/drift",
+            "~/Music/drift-plus",
             "relative music/日本語",
             "C:\\Users\\Music\\drift",
             "music/\"quoted\"/back\\slash\twith\nnewline\rand\0null",
@@ -655,6 +708,37 @@ mod tests {
             let c: Config = toml::from_str(&text).unwrap();
             assert_eq!(c.audio.download_dir, dir);
         }
+    }
+
+    #[test]
+    fn stream_settings_roundtrip() {
+        let a = Audio {
+            cookies_file: "/tmp/my \"cookies\".txt".into(),
+            stream_cookies: true,
+            player_client: "default,android".into(),
+            ytdlp_args: vec!["--proxy".into(), "socks5://127.0.0.1:9050".into()],
+            ..Audio::default()
+        };
+        let text = Config::render(
+            &Playback::default(),
+            &Artist::default(),
+            &Ui::default(),
+            &Discord::default(),
+            &a,
+        );
+        let c: Config = toml::from_str(&text).unwrap();
+        assert_eq!(c.audio.cookies_file, a.cookies_file);
+        assert!(c.audio.stream_cookies);
+        assert_eq!(c.audio.player_client, "default,android");
+        assert_eq!(c.audio.ytdlp_args, a.ytdlp_args);
+        assert_eq!(
+            c.audio.cookie_source().as_deref(),
+            Some("file:/tmp/my \"cookies\".txt")
+        );
+
+        let plain: Config = toml::from_str("").unwrap();
+        assert!(!plain.audio.stream_cookies && plain.audio.ytdlp_args.is_empty());
+        assert_eq!(plain.audio.cookie_source(), None);
     }
 
     #[test]

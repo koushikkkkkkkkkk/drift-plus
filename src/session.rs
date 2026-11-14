@@ -19,7 +19,7 @@ impl Session {
     fn path() -> Result<PathBuf> {
         let dir = crate::store::state_base()
             .ok_or_else(|| anyhow!("cannot determine state directory"))?;
-        Ok(dir.join("drift").join("session.json"))
+        Ok(dir.join("drift-plus").join("session.json"))
     }
 
     /* The first drift to start owns the saved session. Later ones neither

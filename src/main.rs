@@ -28,13 +28,13 @@ use ratatui::DefaultTerminal;
 use app::{App, AppEvent};
 
 const USAGE: &str = "\
-drift - vim-style terminal player for YouTube Music (no login needed)
+drift-plus - vim-style terminal player for YouTube Music (no login needed)
 
 USAGE:
-    drift [QUERY...]      start the player, optionally running a search first
-    drift --check         verify that mpv and yt-dlp are installed
-    drift --help          show this help
-    drift --version
+    drift-plus [QUERY...]      start the player, optionally running a search first
+    drift-plus --check         verify that mpv and yt-dlp are installed
+    drift-plus --help          show this help
+    drift-plus --version
 
 Inside the player press ? for key bindings and :help for commands.";
 
@@ -91,7 +91,7 @@ fn main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         Some("-V") | Some("--version") => {
-            println!("drift {}", env!("CARGO_PKG_VERSION"));
+            println!("drift-plus {}", env!("CARGO_PKG_VERSION"));
             return ExitCode::SUCCESS;
         }
         Some("--check") => {
@@ -111,7 +111,7 @@ fn main() -> ExitCode {
 
     let missing = missing_dependencies(false);
     if !missing.is_empty() {
-        eprintln!("drift needs these programs to search and play music:\n");
+        eprintln!("drift-plus needs these programs to search and play music:\n");
         for m in &missing {
             eprintln!("{m}");
         }

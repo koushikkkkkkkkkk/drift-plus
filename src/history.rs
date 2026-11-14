@@ -28,7 +28,7 @@ pub struct History {
 impl History {
     fn path() -> Result<PathBuf> {
         let dir = state_base().ok_or_else(|| anyhow!("cannot determine state directory"))?;
-        Ok(dir.join("drift").join("history.json"))
+        Ok(dir.join("drift-plus").join("history.json"))
     }
 
     fn read(path: &Path) -> Result<Self> {

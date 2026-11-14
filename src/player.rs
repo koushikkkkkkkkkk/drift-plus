@@ -2,6 +2,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use anyhow::{anyhow, bail, Result};
 use serde_json::{json, Value};
@@ -21,7 +22,7 @@ mod ipc {
 
     pub fn endpoint() -> PathBuf {
         let dir = dirs::runtime_dir().unwrap_or_else(std::env::temp_dir);
-        let path = dir.join(format!("drift-{}.sock", std::process::id()));
+        let path = dir.join(format!("drift-plus-{}.sock", std::process::id()));
         let _ = std::fs::remove_file(&path);
         path
     }
@@ -97,7 +98,7 @@ mod ipc {
     }
 
     pub fn endpoint() -> PathBuf {
-        PathBuf::from(format!(r"\\.\pipe\drift-{}", std::process::id()))
+        PathBuf::from(format!(r"\\.\pipe\drift-plus-{}", std::process::id()))
     }
 
     pub fn connect(path: &Path) -> io::Result<(Reader, Writer)> {
@@ -150,7 +151,7 @@ impl Player {
         .arg(format!("--input-ipc-server={}", sock_path.display()));
 
         if let Ok(extra) =
-            std::env::var("DRIFT_MPV_ARGS").or_else(|_| std::env::var("YTM_MPV_ARGS"))
+            std::env::var("DRIFT_PLUS_MPV_ARGS").or_else(|_| std::env::var("YTM_MPV_ARGS"))
         {
             cmd.args(extra.split_whitespace());
         }
@@ -316,13 +317,156 @@ impl Drop for Player {
 
 const KEEP_FILES: usize = 40;
 
-/// Base yt-dlp command with the user's cookie setting applied.
-fn ytdlp(audio: &Audio) -> Command {
-    let mut cmd = Command::new("yt-dlp");
-    if let Some(browser) = audio.cookies() {
-        cmd.arg("--cookies-from-browser").arg(browser);
+/* How yt-dlp asks YouTube for a song. YouTube now and then answers "Sign in
+ * to confirm you're not a bot"; another route usually still gets through, so
+ * they are tried in turn and the one that worked is used first from then on. */
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Route {
+    /* no account, yt-dlp's own choice of player client */
+    Plain,
+    /* no account, with the android client as a second way in */
+    Android,
+    /* the user's browser cookies or cookies.txt */
+    Cookies,
+}
+
+const ANDROID_CLIENTS: &str = "default,android";
+const NO_ROUTE: u8 = u8::MAX;
+static GOOD_ROUTE: AtomicU8 = AtomicU8::new(NO_ROUTE);
+
+impl Route {
+    fn remembered() -> Option<Route> {
+        match GOOD_ROUTE.load(Ordering::Relaxed) {
+            0 => Some(Route::Plain),
+            1 => Some(Route::Android),
+            2 => Some(Route::Cookies),
+            _ => None,
+        }
     }
+
+    fn remember(self) {
+        GOOD_ROUTE.store(self as u8, Ordering::Relaxed);
+    }
+}
+
+fn has_cookies(audio: &Audio) -> bool {
+    audio.cookie_file().is_some() || audio.cookies().is_some()
+}
+
+fn routes(audio: &Audio, first: Option<Route>) -> Vec<Route> {
+    let cookies = has_cookies(audio);
+    let mut list = Vec::with_capacity(3);
+    if cookies && audio.stream_cookies {
+        list.push(Route::Cookies);
+    }
+    list.push(Route::Plain);
+    if audio.player_client.trim() != ANDROID_CLIENTS {
+        list.push(Route::Android);
+    }
+    if cookies && !audio.stream_cookies {
+        list.push(Route::Cookies);
+    }
+    if let Some(i) = first.and_then(|f| list.iter().position(|r| *r == f)) {
+        let route = list.remove(i);
+        list.insert(0, route);
+    }
+    list
+}
+
+/// Base yt-dlp command for one route.
+fn ytdlp(audio: &Audio, route: Route) -> Command {
+    let mut cmd = Command::new("yt-dlp");
+    let client = audio.player_client.trim();
+    match route {
+        Route::Cookies => {
+            if let Some(file) = audio.cookie_file() {
+                cmd.arg("--cookies").arg(file);
+            } else if let Some(browser) = audio.cookies() {
+                cmd.arg("--cookies-from-browser").arg(browser);
+            }
+        }
+        Route::Plain if !client.is_empty() => {
+            cmd.arg("--extractor-args")
+                .arg(format!("youtube:player_client={client}"));
+        }
+        Route::Plain => {}
+        Route::Android => {
+            cmd.arg("--extractor-args")
+                .arg(format!("youtube:player_client={ANDROID_CLIENTS}"));
+        }
+    }
+    cmd.args(&audio.ytdlp_args);
     cmd
+}
+
+/// YouTube wants proof that a person is asking.
+pub fn is_bot_wall(msg: &str) -> bool {
+    let m = msg.to_lowercase();
+    ["not a bot", "sign in to confirm", "login_required", "confirm you"]
+        .iter()
+        .any(|p| m.contains(p))
+}
+
+/* nothing another route could change */
+fn is_final(msg: &str) -> bool {
+    let m = msg.to_lowercase();
+    [
+        "could not run yt-dlp",
+        "can't create",
+        "not available in your country",
+        "has been removed",
+        "has been terminated",
+    ]
+    .iter()
+    .any(|p| m.contains(p))
+}
+
+fn explain(msg: String, audio: &Audio) -> String {
+    if !is_bot_wall(&msg) {
+        return msg;
+    }
+    if has_cookies(audio) {
+        format!("{msg} (cookies did not help: sign in to YouTube in that browser again, or update yt-dlp)")
+    } else {
+        format!("{msg} (update yt-dlp, or set cookies_from_browser in config.toml)")
+    }
+}
+
+/* Run `attempt` over the routes until one works. */
+fn try_routes<T>(
+    audio: &Audio,
+    list: Vec<Route>,
+    mut attempt: impl FnMut(Route) -> Result<T, String>,
+) -> (Result<T, String>, Option<Route>) {
+    let mut shown: Option<String> = None;
+    for route in list {
+        match attempt(route) {
+            Ok(value) => return (Ok(value), Some(route)),
+            Err(e) => {
+                let stop = is_final(&e);
+                /* the bot check is the answer worth showing: it can be acted on */
+                if shown.as_deref().is_none_or(|s| !is_bot_wall(s) && is_bot_wall(&e)) {
+                    shown = Some(e);
+                }
+                if stop {
+                    break;
+                }
+            }
+        }
+    }
+    let msg = shown.unwrap_or_else(|| "yt-dlp was not run".into());
+    (Err(explain(msg, audio)), None)
+}
+
+fn with_routes<T>(
+    audio: &Audio,
+    attempt: impl FnMut(Route) -> Result<T, String>,
+) -> Result<T, String> {
+    let (result, route) = try_routes(audio, routes(audio, Route::remembered()), attempt);
+    if let Some(route) = route {
+        route.remember();
+    }
+    result
 }
 
 fn download_component(text: &str) -> String {
@@ -350,6 +494,7 @@ fn download_command(
     track: &crate::model::Track,
     audio: &Audio,
     dir: &std::path::Path,
+    route: Route,
 ) -> Result<Command, String> {
     if track.id.len() != 11
         || !track
@@ -365,7 +510,7 @@ fn download_command(
         download_component(&track.title),
         track.id,
     );
-    let mut cmd = ytdlp(audio);
+    let mut cmd = ytdlp(audio, route);
     cmd.args([
         "--ignore-config",
         "-f",
@@ -391,8 +536,18 @@ pub fn download_track(
     audio: &Audio,
     dir: &std::path::Path,
 ) -> Result<(), String> {
-    let mut cmd = download_command(track, audio, dir)?;
+    download_command(track, audio, dir, Route::Plain)?;
     std::fs::create_dir_all(dir).map_err(|e| format!("can't create {}: {e}", dir.display()))?;
+    with_routes(audio, |route| download_once(track, audio, dir, route))
+}
+
+fn download_once(
+    track: &crate::model::Track,
+    audio: &Audio,
+    dir: &std::path::Path,
+    route: Route,
+) -> Result<(), String> {
+    let mut cmd = download_command(track, audio, dir, route)?;
     let out = cmd
         .output()
         .map_err(|e| format!("could not run yt-dlp ({e}); is it installed and on PATH?"))?;
@@ -417,7 +572,7 @@ pub fn download_track(
 fn audio_dir() -> PathBuf {
     dirs::cache_dir()
         .unwrap_or_else(std::env::temp_dir)
-        .join("drift")
+        .join("drift-plus")
         .join("audio")
 }
 
@@ -435,7 +590,16 @@ pub fn fetch_audio(id: &str, audio: &Audio) -> Result<PathBuf, String> {
     }
     let dir = audio_dir();
     std::fs::create_dir_all(&dir).map_err(|e| format!("can't create {}: {e}", dir.display()))?;
-    let mut cmd = ytdlp(audio);
+    with_routes(audio, |route| fetch_once(id, audio, &dir, route))
+}
+
+fn fetch_once(
+    id: &str,
+    audio: &Audio,
+    dir: &std::path::Path,
+    route: Route,
+) -> Result<PathBuf, String> {
+    let mut cmd = ytdlp(audio, route);
     cmd.args([
         "-f",
         "bestaudio/best",
@@ -445,7 +609,7 @@ pub fn fetch_audio(id: &str, audio: &Audio) -> Result<PathBuf, String> {
         "--no-mtime",
     ])
     .arg("-P")
-    .arg(&dir)
+    .arg(dir)
     .args(["-o", "%(id)s.%(ext)s"])
     .arg(format!("https://music.youtube.com/watch?v={id}"))
     .stdin(Stdio::null())
@@ -455,7 +619,7 @@ pub fn fetch_audio(id: &str, audio: &Audio) -> Result<PathBuf, String> {
         .output()
         .map_err(|e| format!("could not run yt-dlp ({e}); is it installed and on PATH?"))?;
     if let Some(path) = cached_audio(id).filter(|_| out.status.success()) {
-        prune(&dir);
+        prune(dir);
         return Ok(path);
     }
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -470,12 +634,21 @@ pub fn fetch_audio(id: &str, audio: &Audio) -> Result<PathBuf, String> {
 /// Ask yt-dlp for the direct media URL so mpv can start playing right away
 /// instead of waiting for the whole file to download.
 pub fn resolve_stream(id: &str, audio: &Audio) -> Result<String, String> {
-    let mut cmd = ytdlp(audio);
+    with_routes(audio, |route| resolve_once(id, audio, route))
+}
+
+/* Plain https audio first: mpv starts on it sooner than on an HLS playlist. */
+const STREAM_FORMAT: &str = "bestaudio[protocol^=http]/bestaudio/best";
+
+fn resolve_once(id: &str, audio: &Audio, route: Route) -> Result<String, String> {
+    let mut cmd = ytdlp(audio, route);
     cmd.args([
         "-f",
-        "bestaudio/best",
+        STREAM_FORMAT,
         "--no-playlist",
         "--no-warnings",
+        "--socket-timeout",
+        "15",
         "-O",
         "%(available_at|0)s",
         "-g",
@@ -594,7 +767,7 @@ mod tests {
             ..Audio::default()
         };
         let dir = std::env::temp_dir().join("drift downloads");
-        let cmd = download_command(&download_test_track(), &audio, &dir).unwrap();
+        let cmd = download_command(&download_test_track(), &audio, &dir, Route::Cookies).unwrap();
         assert_eq!(cmd.get_program(), "yt-dlp");
         let args: Vec<_> = cmd.get_args().map(|arg| arg.to_string_lossy()).collect();
         assert_eq!(
@@ -682,6 +855,99 @@ mod tests {
     }
 
     #[test]
+    fn routes_avoid_the_bot_check() {
+        let args = |audio: &Audio, route| -> Vec<String> {
+            ytdlp(audio, route)
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect()
+        };
+        let anon = Audio::default();
+        assert_eq!(routes(&anon, None), [Route::Plain, Route::Android]);
+        assert!(args(&anon, Route::Plain).is_empty());
+        assert_eq!(
+            args(&anon, Route::Android),
+            ["--extractor-args", "youtube:player_client=default,android"]
+        );
+        /* without cookies configured, asking for them changes nothing */
+        assert!(args(&anon, Route::Cookies).is_empty());
+
+        /* an account is the last resort unless the user wants it first */
+        let mut signed = Audio {
+            cookies_from_browser: "firefox".into(),
+            ytdlp_args: vec!["--proxy".into(), "p".into()],
+            ..Audio::default()
+        };
+        assert_eq!(
+            routes(&signed, None),
+            [Route::Plain, Route::Android, Route::Cookies]
+        );
+        assert_eq!(args(&signed, Route::Plain), ["--proxy", "p"]);
+        assert_eq!(
+            args(&signed, Route::Cookies),
+            ["--cookies-from-browser", "firefox", "--proxy", "p"]
+        );
+        /* what worked last time goes first */
+        assert_eq!(
+            routes(&signed, Some(Route::Cookies)),
+            [Route::Cookies, Route::Plain, Route::Android]
+        );
+        signed.stream_cookies = true;
+        assert_eq!(
+            routes(&signed, None),
+            [Route::Cookies, Route::Plain, Route::Android]
+        );
+        signed.cookies_file = "/tmp/c.txt".into();
+        signed.player_client = " default,android ".into();
+        assert_eq!(routes(&signed, None), [Route::Cookies, Route::Plain]);
+        assert_eq!(
+            args(&signed, Route::Cookies),
+            ["--cookies", "/tmp/c.txt", "--proxy", "p"]
+        );
+        assert_eq!(
+            args(&signed, Route::Plain)[..2],
+            ["--extractor-args", "youtube:player_client=default,android"]
+        );
+    }
+
+    #[test]
+    fn blocked_lookups_move_to_the_next_route() {
+        let wall = "Sign in to confirm you're not a bot. Use --cookies.";
+        let anon = Audio::default();
+        assert!(is_bot_wall(wall) && !is_bot_wall("HTTP Error 403: Forbidden"));
+
+        let mut seen = Vec::new();
+        let (result, route) = try_routes(&anon, routes(&anon, None), |route| {
+            seen.push(route);
+            match route {
+                Route::Plain => Err(wall.to_string()),
+                _ => Ok("https://stream"),
+            }
+        });
+        assert_eq!(result, Ok("https://stream"));
+        assert_eq!(route, Some(Route::Android));
+        assert_eq!(seen, [Route::Plain, Route::Android]);
+
+        /* every route refused: say what the user can do about it */
+        let (result, route) = try_routes(&anon, routes(&anon, None), |route| match route {
+            Route::Plain => Err::<(), _>(wall.to_string()),
+            _ => Err("Requested format is not available".to_string()),
+        });
+        let msg = result.unwrap_err();
+        assert!(msg.starts_with(wall) && msg.contains("cookies_from_browser"));
+        assert_eq!(route, None);
+
+        /* a missing yt-dlp is not retried */
+        let mut tries = 0;
+        let (result, _) = try_routes(&anon, routes(&anon, None), |_| {
+            tries += 1;
+            Err::<(), _>("could not run yt-dlp (not found); is it installed and on PATH?".into())
+        });
+        assert!(result.unwrap_err().starts_with("could not run yt-dlp"));
+        assert_eq!(tries, 1);
+    }
+
+    #[test]
     fn wait_until_available_at() {
         let now = UNIX_EPOCH + Duration::from_secs(1_000);
         assert_eq!(wait_until(1_004, now), Duration::from_secs(4));
@@ -715,7 +981,7 @@ mod tests {
         data.extend_from_slice(&samples);
         std::fs::write(&wav, data).unwrap();
 
-        std::env::set_var("DRIFT_MPV_ARGS", "--ao=null");
+        std::env::set_var("DRIFT_PLUS_MPV_ARGS", "--ao=null");
         let (tx, rx) = mpsc::channel();
         let mut p = Player::spawn(50, move |e| {
             let _ = tx.send(e);

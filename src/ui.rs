@@ -167,7 +167,7 @@ fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(" ♪ ", Style::new().fg(app.accent)),
-            Span::styled("Drift", Style::new().fg(app.accent).bold()),
+            Span::styled("Drift+", Style::new().fg(app.accent).bold()),
         ])),
         name,
     );
@@ -827,7 +827,7 @@ fn draw_now_playing(f: &mut Frame, app: &App, area: Rect) {
 fn draw_lyrics_header(f: &mut Frame, app: &App, area: Rect) {
     let unsynced = matches!(&app.lyrics, LyricsState::Ready(l) if !l.synced);
     let mut title = vec![
-        Span::styled(" Drift", Style::new().fg(app.accent).bold()),
+        Span::styled(" Drift+", Style::new().fg(app.accent).bold()),
         Span::styled(
             match app.mode {
                 Mode::Artwork => "  ·  Cover",
@@ -1465,7 +1465,7 @@ const CMD_INFO: &[(&str, &str)] = &[
     ("stop", "stop playback"),
     ("next", "skip to the next track"),
     ("prev", "go back to the previous track"),
-    ("quit", "exit drift"),
+    ("quit", "exit drift-plus"),
     ("add", "queue the selected result  ·  add N"),
     ("addall", "queue all results"),
     ("playall", "play all results"),
@@ -2424,8 +2424,8 @@ mod tests {
     fn open_playlist_renders() {
         let dir = std::env::temp_dir().join(format!("drift-ui-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        std::env::set_var("DRIFT_CONFIG_DIR", &dir);
-        std::env::set_var("DRIFT_STATE_DIR", &dir);
+        std::env::set_var("DRIFT_PLUS_CONFIG_DIR", &dir);
+        std::env::set_var("DRIFT_PLUS_STATE_DIR", &dir);
 
         let (tx, _rx) = mpsc::channel();
         let mut app = App::new(tx);

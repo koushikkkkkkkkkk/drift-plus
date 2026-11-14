@@ -579,8 +579,12 @@ fn ytdlp_entries(target: &str) -> Result<Vec<Track>> {
 
 fn ytdlp_base(cookies: Option<&str>) -> Command {
     let mut cmd = Command::new("yt-dlp");
-    if let Some(browser) = cookies.map(str::trim).filter(|b| !b.is_empty()) {
-        cmd.arg("--cookies-from-browser").arg(browser);
+    if let Some(source) = cookies.map(str::trim).filter(|b| !b.is_empty()) {
+        /* `file:<path>` is a cookies.txt, anything else a browser name */
+        match source.strip_prefix("file:") {
+            Some(path) => cmd.arg("--cookies").arg(path),
+            None => cmd.arg("--cookies-from-browser").arg(source),
+        };
     }
     cmd
 }

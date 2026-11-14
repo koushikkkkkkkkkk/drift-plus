@@ -37,10 +37,10 @@ mod imp {
     impl Mpris {
         /* None when there is no session bus. */
         pub fn new(send: impl Fn(Cmd) + Send + 'static) -> Option<Mpris> {
-            let name = format!("drift.instance{}", std::process::id());
+            let name = format!("drift_plus.instance{}", std::process::id());
             let config = PlatformConfig {
                 dbus_name: &name,
-                display_name: "drift",
+                display_name: "drift-plus",
                 hwnd: None,
             };
             let mut controls = MediaControls::new(config).ok()?;
