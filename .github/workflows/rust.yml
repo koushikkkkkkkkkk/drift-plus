@@ -18,6 +18,8 @@ jobs:
     - uses: actions/checkout@v7
     - name: Build
       run: cargo build
+      env:
+        RUSTFLAGS: -D warnings
     - name: Run tests
       run: cargo test
     - name: Build release binary

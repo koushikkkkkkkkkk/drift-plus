@@ -4,6 +4,13 @@ Changes to drift. Loosely follows [Keep A Changelog](https://keepachangelog.com/
 
 ### Added
 
+- drift-plus: tighter YouTube Music integration
+  - Autoplay: when the queue or list runs out, playback continues with similar songs (`:autoplay`, `autoplay` under `[playback]`, now on by default)
+  - Synced playlists: `:link URL [name]`, `:unlink name` and `:sync` keep playlists up to date with YouTube Music; with `cookies_from_browser` set, the account's library and Liked Music are linked automatically
+  - `F` now cycles lyrics → cover art → cover art and lyrics → player
+  - The next song's stream, and the stream of the song under the cursor, are looked up ahead of time so playback starts sooner
+  - New `[youtube]` config section: `sync`, `sync_minutes`, `library`, `prewarm`, `prewarm_selected`
+
 - Download support for saving songs permanently to disk
   - Press `D` to download current song, `gd` for highlighted, `gD` for all in collection
   - Commands: `:download`, `:download selected`, `:download all` (alias `:dl`)

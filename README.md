@@ -1,19 +1,17 @@
-<div align="center">
+# drift-plus
 
-# Drift
+A YouTube Music player for your terminal, with Vim keybinds. This is a fork of
+[Drift](https://github.com/socatlolmeow/drift) by socatlolmeow (GPL-3.0-or-later) with
+tighter YouTube Music integration.
 
-### A YouTube Music player for your terminal, with Vim keybinds.
+## What drift-plus adds
 
-Search, queue and play music with no account, no login and no browser.
+- **Autoplay.** When the queue or list runs out, playback continues with songs similar to the last one, like YouTube Music's radio. On by default; `:autoplay off` or `autoplay = false` turns it off.
+- **Playlists that update themselves.** `:link <playlist URL>` saves a YouTube / YouTube Music playlist and keeps it in step with YouTube: at startup, every 30 minutes, and on `:sync`. With `cookies_from_browser` set, every playlist in your YouTube Music library and Liked Music are linked for you. See [Synced playlists](#synced-playlists).
+- **A cover art view.** `F` now cycles lyrics → cover art → cover art and lyrics → player.
+- **Faster starts.** The stream of the next song is looked up while the current one plays, and the song under the cursor is looked up after the cursor rests on it, so the wait for yt-dlp mostly disappears. See [Faster playback](#faster-playback).
 
-[![Stars](https://img.shields.io/github/stars/socatlolmeow/drift?style=flat-square&logo=github)](https://github.com/socatlolmeow/drift/stargazers)
-[![Build](https://img.shields.io/github/actions/workflow/status/socatlolmeow/drift/rust.yml?branch=main&style=flat-square&label=build)](https://github.com/socatlolmeow/drift/actions/workflows/rust.yml)
-[![License](https://img.shields.io/github/license/socatlolmeow/drift?style=flat-square)](LICENSE)
-![Rust](https://img.shields.io/badge/built%20with-Rust-orange?style=flat-square&logo=rust)
-
-<img src="https://github.com/socatlolmeow/drift/blob/main/examples/showcase.gif?raw=true" alt="Drift showcase" />
-
-</div>
+The program, config directory and commands are still called `drift`, so it is a drop-in replacement.
 
 ---
 
@@ -29,7 +27,9 @@ Search, queue and play music with no account, no login and no browser.
 - [Usage](#usage)
 - [Keybinds](#keybinds)
 - [Commands](#commands)
-- [Lyrics](#lyrics)
+- [Lyrics and cover art](#lyrics-and-cover-art)
+- [Synced playlists](#synced-playlists)
+- [Faster playback](#faster-playback)
 - [Configuration](#configuration)
   - [Streaming or downloading](#streaming-or-downloading)
   - [Discord rich presence](#discord-rich-presence)
@@ -60,6 +60,8 @@ Drift needs [mpv](https://mpv.io/) for playback and [yt-dlp](https://github.com/
 
 ### Arch Linux (AUR)
 
+The AUR package is the original Drift, without the drift-plus additions.
+
 ```bash
 yay -S driftmusic-git
 ```
@@ -79,8 +81,8 @@ makepkg -si
 Works on Arch, Debian/Ubuntu, Fedora, openSUSE, Void, Alpine and Gentoo. It installs the dependencies and builds Drift with cargo.
 
 ```bash
-git clone https://github.com/socatlolmeow/drift.git
-cd drift
+git clone https://github.com/koushikkkkkkkkkk/drift-plus.git
+cd drift-plus
 ./install.sh
 ```
 
@@ -89,8 +91,8 @@ cd drift
 Install the dependencies and [Rust](https://rustup.rs/), then:
 
 ```bash
-git clone https://github.com/socatlolmeow/drift.git
-cd drift
+git clone https://github.com/koushikkkkkkkkkk/drift-plus.git
+cd drift-plus
 cargo install --path .
 ```
 
@@ -101,7 +103,7 @@ This puts `drift` in `~/.cargo/bin/`, which is on your `$PATH` if you installed 
 The repo has a flake that puts `mpv` and `yt-dlp` on Drift's `PATH` for you:
 
 ```bash
-nix run github:socatlolmeow/drift
+nix run github:koushikkkkkkkkkk/drift-plus
 ```
 
 ### Installing mpv and yt-dlp manually
@@ -153,7 +155,7 @@ These are the defaults. You can change them, see [Custom keys](#custom-keys).
 | `gd` | download the highlighted song |
 | `gD` | download the whole album, playlist, queue or loaded results |
 | `L` | toggle the lyrics panel |
-| `F` | cycle fullscreen lyrics → cover art and lyrics → player |
+| `F` | cycle fullscreen lyrics → cover art → cover art and lyrics → player |
 | `/` `:` | search / command line |
 | `?` | help |
 | `q` | quit |
@@ -179,6 +181,10 @@ Press `:` to open the command line. Most commands have short aliases (`:vol`, `:
 | `:savealbum [name]` `:saveresults [name]` | save an album or the results directly as a playlist |
 | `:addto name` `:delpl name` | add a song to / delete a playlist |
 | `:import URL` | import a YouTube / YouTube Music playlist |
+| `:link URL [name]` | save a YouTube / YouTube Music playlist and keep it in sync |
+| `:unlink name` | stop syncing a playlist (its songs stay) |
+| `:sync` | refresh linked playlists and your library now |
+| `:autoplay [on\|off]` | continue with similar songs when everything has played |
 | `:album [query]` | open the selected song's album, or search albums |
 | `:playlist query` | search YouTube Music playlists |
 | `:similar` | songs similar to the selected one (also `:radio`) |
@@ -189,19 +195,57 @@ Press `:` to open the command line. Most commands have short aliases (`:vol`, `:
 
 `:save` refuses to overwrite an existing playlist. Use `:save!` to replace it or `:append` to add to the end of it.
 
-## Lyrics
+## Lyrics and cover art
 
-Press `L` for a side panel (needs a terminal at least 70 columns wide). Press `F` to cycle through fullscreen lyrics, cover art and lyrics, and back to the player. `Esc`, `q` or `L` also closes either fullscreen view.
+Press `L` for a lyrics side panel (needs a terminal at least 70 columns wide). Press `F` to cycle through the fullscreen views:
 
-The cover view shows square artwork, the song title, artist and album, and a progress bar with elapsed and remaining time on the left. Lyrics appear on the right, with the current line kept near the middle and surrounding lines fading with distance. This view hides the bottom player bar to give the artwork and lyrics more room.
+1. **Lyrics**: the lyrics on their own.
+2. **Cover art**: the artwork as large as the window allows, with the title, artist, album and a progress bar underneath.
+3. **Cover art and lyrics**: the artwork and track details on the left, lyrics on the right.
+4. Back to the player.
 
-In both fullscreen views the current line gets bold, white text on a dark neutral band with extra breathing room, while nearby lines fade with distance. It fills in as it's sung. Songs without synced lyrics show plain text that you can scroll with `j`/`k`.
+`Esc`, `q` or `L` closes any of them. The two cover views hide the bottom player bar to leave more room.
 
-Both fullscreen views keep playback controls available: `Space` to pause or resume, `h`/`l` or the arrow keys to seek, `n`/`N` to skip tracks, `+`/`-` for volume, `s` for shuffle and `r` to cycle repeat.
+In the lyrics views the current line gets bold, white text on a dark neutral band, while nearby lines fade with distance. It fills in as it's sung. Songs without synced lyrics show plain text that you can scroll with `j`/`k`.
 
-Lyrics come from [LRCLIB](https://lrclib.net) and are only fetched while the panel or fullscreen view is open.
+All fullscreen views keep playback controls available: `Space` to pause or resume, `h`/`l` or the arrow keys to seek, `n`/`N` to skip tracks, `+`/`-` for volume, `s` for shuffle and `r` to cycle repeat.
 
-Artwork comes from YouTube thumbnails and is only fetched when the cover view is open. Drift trims black bars and crops and resizes the image to 1000 × 1000 pixels. Terminals detected as supporting the Kitty or iTerm2 graphics protocol show the image directly; other terminals use colored half blocks for a rough preview. The cover is hidden in very short windows to leave room for track details.
+Lyrics come from [LRCLIB](https://lrclib.net) and are only fetched while a lyrics or cover view is open.
+
+Artwork comes from YouTube thumbnails and is only fetched when a cover view is open. Drift trims black bars and crops and resizes the image to 1000 × 1000 pixels. Terminals detected as supporting the Kitty or iTerm2 graphics protocol show the image directly; other terminals use colored half blocks for a rough preview. The cover is hidden in very short windows to leave room for track details.
+
+## Synced playlists
+
+A linked playlist is a normal playlist in the Playlists tab (marked `↻`) whose songs are re-read from YouTube, so anything you add or remove in YouTube Music shows up here.
+
+```
+:link https://music.youtube.com/playlist?list=PL...            # named after the playlist
+:link https://music.youtube.com/playlist?list=PL... Road trip   # or pick a name
+:sync                                                           # refresh everything now
+:unlink Road trip                                               # keep the songs, stop syncing
+```
+
+Linked playlists are refreshed when drift starts, every `sync_minutes` (30 by default) while it runs, and on `:sync`.
+
+**Your own library.** Public and unlisted playlists need no account. To follow your private playlists and Liked Music, set `cookies_from_browser` under `[audio]` to a browser where you are signed in to YouTube Music (for example `"firefox"`). On the next sync drift links every playlist in your library by itself, and new playlists you create later appear after the following sync. Set `library = false` under `[youtube]` to link playlists only by hand.
+
+Things to know:
+
+- Syncing is one-way, from YouTube to drift. Changes made here to a linked playlist are replaced on the next sync; to change it for good, edit it in YouTube Music, or `:unlink` it first.
+- A linked playlist never replaces a playlist you made in drift. On a name clash the linked one is called `Name (YouTube)`.
+- Deleting or unlinking a library playlist here keeps the library sync from bringing it back. `:link` its URL to follow it again.
+- If a refresh fails (offline, playlist made private), the songs already saved are kept.
+- The queue is a copy: a sync does not change what is already queued.
+
+## Faster playback
+
+Most of the wait before a song starts is yt-dlp working out the stream address. drift-plus does that ahead of time:
+
+- While a song plays, the stream of the next one in the queue or list is looked up, so moving on is immediate. This is skipped with shuffle on, since the next song isn't known.
+- When the cursor rests on a song for about a second, its stream is looked up too, and mpv is started in the background, so `Enter` plays it right away.
+- Looked-up streams are remembered for three hours. If one has expired by the time it's played, it's looked up again without counting as a failed song.
+
+The first song after starting drift, or a song you play before the lookup finishes, still takes as long as yt-dlp needs. Both lookups can be turned off with `prewarm` and `prewarm_selected` under `[youtube]`; the second one runs yt-dlp more often than plain playback would. For no waiting at all on a slow connection, `download = true` under `[audio]` caches songs on disk and fetches the next one in the background.
 
 ## Configuration
 
@@ -212,7 +256,7 @@ Settings live in `config.toml` inside Drift's config directory (`~/.config/drift
 volume = 80
 shuffle = false
 repeat = "off"        # off, all or one
-autoplay = false
+autoplay = true       # keep playing similar songs when the queue or list runs out
 restore_session = true
 seek_step = 5.0
 volume_step = 5.0
@@ -230,7 +274,14 @@ client_id = ""        # set this to enable Discord rich presence
 download = false              # false: stream songs; true: download to the cache first
 download_max_minutes = 15     # with download = true, longer songs are still streamed (0 = no limit)
 download_dir = "~/Music/drift"
-cookies_from_browser = ""     # e.g. "firefox" or "chrome"; passed to yt-dlp when YouTube blocks playback
+cookies_from_browser = ""     # e.g. "firefox" or "chrome"; also what signs you in for library sync
+
+[youtube]
+sync = true                   # keep linked playlists up to date
+sync_minutes = 30             # 0 = only at startup and on :sync
+library = true                # with cookies_from_browser set, link your whole library
+prewarm = true                # look up the next song's stream ahead of time
+prewarm_selected = true       # also look up the song under the cursor
 
 [keys]
 quit = "Q"
@@ -240,7 +291,7 @@ go_top = ["gg", "home"]
 shuffle = []                  # an empty list unbinds the action
 ```
 
-If you already have a `config.toml` from an older version, add the `[audio]` section by hand, since Drift never rewrites the file.
+If you already have a `config.toml` from an older version, add the `[audio]` and `[youtube]` sections by hand, since Drift never rewrites the file. Settings you leave out use the defaults shown above.
 
 ### Streaming or downloading
 
@@ -331,7 +382,7 @@ In the Playlists tab `seek_forward` opens the selected playlist, and `seek_back`
 
 **The lyrics panel doesn't show up.** It needs a terminal at least 70 columns wide. Make the window wider or use `F` for fullscreen lyrics.
 
-**Cover art looks blocky or is missing.** Press `F` twice from the player to open the cover view. A blocky preview means Drift couldn't detect Kitty or iTerm2 graphics support in your terminal. If you see "Cover art unavailable", the YouTube thumbnail couldn't be fetched or decoded. In very short windows, make the terminal taller to show the cover.
+**Cover art looks blocky or is missing.** Press `F` twice from the player to open the cover view, and a third time for the cover next to the lyrics. A blocky preview means Drift couldn't detect Kitty or iTerm2 graphics support in your terminal. If you see "Cover art unavailable", the YouTube thumbnail couldn't be fetched or decoded. In very short windows, make the terminal taller to show the cover.
 
 **`drift: command not found`.** Make sure `~/.cargo/bin` is in your `$PATH`.
 
@@ -352,4 +403,4 @@ Recent changes are listed in [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 
-[Drift](https://github.com/socatlolmeow/drift) is free software, released under the [GNU General Public License version 3 or later](https://www.gnu.org/licenses/gpl-3.0.html).
+drift-plus is a modified version of [Drift](https://github.com/socatlolmeow/drift) by socatlolmeow. Like Drift, it is free software, released under the [GNU General Public License version 3 or later](https://www.gnu.org/licenses/gpl-3.0.html).
