@@ -1,0 +1,343 @@
+use crate::model::{parse_clock, RepeatMode};
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Amount {
+    Abs(f64),
+    Delta(f64),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DownloadTarget {
+    Current,
+    Selected,
+    All,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Command {
+    Search(String),
+    Play(Option<usize>),
+    Pause,
+    Resume,
+    Toggle,
+    Stop,
+    Next,
+    Prev,
+    Quit,
+    Add(Option<usize>),
+    AddAll,
+    PlayAll,
+    Download(DownloadTarget),
+    Remove(Option<usize>),
+    Clear,
+    ShowResults,
+    ShowQueue,
+    ShowPlaylists,
+    ShowRecent,
+    ShowMostPlayed,
+    Volume(Amount),
+    Seek(Amount),
+    Shuffle,
+    Repeat(Option<RepeatMode>),
+    Save(String),
+    SaveForce(String),
+    SaveAlbum(Option<String>),
+    SaveResults(Option<String>),
+    Load(String),
+    Append(String),
+    DeletePlaylist(String),
+    AddTo(String),
+    Import(String),
+    Artist,
+    Similar,
+    Album(Option<String>),
+    PlaylistSearch(String),
+    Lyrics,
+    Help,
+}
+
+pub const COMMAND_NAMES: &[&str] = &[
+    "search",
+    "play",
+    "pause",
+    "resume",
+    "toggle",
+    "stop",
+    "next",
+    "prev",
+    "quit",
+    "add",
+    "addall",
+    "playall",
+    "download",
+    "remove",
+    "clear",
+    "results",
+    "queue",
+    "playlists",
+    "recent",
+    "mostplayed",
+    "volume",
+    "seek",
+    "shuffle",
+    "repeat",
+    "save",
+    "savealbum",
+    "saveresults",
+    "load",
+    "append",
+    "delpl",
+    "addto",
+    "import",
+    "artist",
+    "similar",
+    "album",
+    "playlist",
+    "lyrics",
+    "help",
+];
+
+fn unquote(s: &str) -> &str {
+    let s = s.trim();
+    let b = s.as_bytes();
+    if b.len() >= 2 && (b[0] == b'"' || b[0] == b'\'') && b[b.len() - 1] == b[0] {
+        &s[1..s.len() - 1]
+    } else {
+        s
+    }
+}
+
+fn index_arg(arg: &str, cmd: &str) -> Result<Option<usize>, String> {
+    if arg.is_empty() {
+        return Ok(None);
+    }
+    match arg.parse::<usize>() {
+        Ok(n) if n >= 1 => Ok(Some(n)),
+        _ => Err(format!(
+            ":{cmd} expects a row number (1, 2, 3 …), got '{arg}'"
+        )),
+    }
+}
+
+fn name_arg(arg: &str, cmd: &str) -> Result<String, String> {
+    let a = unquote(arg);
+    if a.is_empty() {
+        Err(format!("usage: :{cmd} <name>"))
+    } else {
+        Ok(a.to_string())
+    }
+}
+
+fn parse_amount(arg: &str, cmd: &str) -> Result<Amount, String> {
+    let a = arg.trim().trim_end_matches('%');
+    if a.is_empty() {
+        return Err(format!("usage: :{cmd} <value>  (e.g. 50, +10, -10)"));
+    }
+    let err = || format!(":{cmd}: cannot understand '{arg}'");
+    if let Some(rest) = a.strip_prefix('+') {
+        Ok(Amount::Delta(parse_clock(rest).ok_or_else(err)?))
+    } else if let Some(rest) = a.strip_prefix('-') {
+        Ok(Amount::Delta(-parse_clock(rest).ok_or_else(err)?))
+    } else {
+        Ok(Amount::Abs(parse_clock(a).ok_or_else(err)?))
+    }
+}
+
+pub fn parse(line: &str) -> Result<Option<Command>, String> {
+    let line = line.trim().trim_start_matches(':').trim();
+    if line.is_empty() {
+        return Ok(None);
+    }
+    let end = line
+        .find(|c: char| !(c.is_ascii_alphabetic() || c == '!'))
+        .unwrap_or(line.len());
+    let (name, rest) = line.split_at(end);
+    let rest = rest.trim();
+    let arg = unquote(rest);
+
+    use Command::*;
+    let cmd = match name.to_ascii_lowercase().as_str() {
+        "search" | "s" | "find" => {
+            if arg.is_empty() {
+                return Err("usage: :search \"your query\"".into());
+            }
+            Search(arg.to_string())
+        }
+        "play" => Play(index_arg(arg, "play")?),
+        "pause" => Pause,
+        "resume" | "unpause" => Resume,
+        "toggle" => Toggle,
+        "stop" => Stop,
+        "next" | "n" => Next,
+        "prev" | "previous" => Prev,
+        "quit" | "q" | "exit" | "q!" | "qa" | "wq" => Quit,
+        "add" | "a" => Add(index_arg(arg, "add")?),
+        "addall" => AddAll,
+        "playall" => PlayAll,
+        "download" | "dl" => Download(match arg.to_ascii_lowercase().as_str() {
+            "" | "current" => DownloadTarget::Current,
+            "selected" => DownloadTarget::Selected,
+            "all" => DownloadTarget::All,
+            _ => return Err("usage: :download [current|selected|all]".into()),
+        }),
+        "remove" | "rm" | "del" => Remove(index_arg(arg, "remove")?),
+        "clear" => Clear,
+        "results" | "res" => ShowResults,
+        "queue" => ShowQueue,
+        "playlists" | "pls" => ShowPlaylists,
+        "recent" | "history" => ShowRecent,
+        "mostplayed" | "most" => ShowMostPlayed,
+        "volume" | "vol" | "v" => Volume(parse_amount(arg, "volume")?),
+        "seek" => Seek(parse_amount(arg, "seek")?),
+        "shuffle" => Shuffle,
+        "repeat" => match arg.to_ascii_lowercase().as_str() {
+            "" => Repeat(None),
+            "off" | "none" | "no" => Repeat(Some(RepeatMode::Off)),
+            "all" | "queue" => Repeat(Some(RepeatMode::All)),
+            "one" | "track" | "1" => Repeat(Some(RepeatMode::One)),
+            other => return Err(format!(":repeat expects off|all|one, got '{other}'")),
+        },
+        "save" | "w" => Save(name_arg(arg, "save")?),
+        "save!" | "w!" => SaveForce(name_arg(arg, "save!")?),
+        "savealbum" | "sa" => SaveAlbum((!arg.is_empty()).then(|| arg.to_string())),
+        "saveresults" | "sr" => SaveResults((!arg.is_empty()).then(|| arg.to_string())),
+        "load" | "e" => Load(name_arg(arg, "load")?),
+        "append" => Append(name_arg(arg, "append")?),
+        "delpl" | "deletepl" | "delete" => DeletePlaylist(name_arg(arg, "delpl")?),
+        "addto" => AddTo(name_arg(arg, "addto")?),
+        "import" => {
+            if arg.is_empty() {
+                return Err("usage: :import <youtube / youtube music playlist URL>".into());
+            }
+            Import(arg.to_string())
+        }
+        "artist" | "ar" => Artist,
+        "similar" | "radio" | "sim" => Similar,
+        "album" | "albums" | "al" => Album((!arg.is_empty()).then(|| arg.to_string())),
+        "playlist" => {
+            if arg.is_empty() {
+                return Err("usage: :playlist \"query\"".into());
+            }
+            PlaylistSearch(arg.to_string())
+        }
+        "lyrics" | "ly" => Lyrics,
+        "help" | "h" => Help,
+        other => return Err(format!("unknown command: :{other}  (try :help)")),
+    };
+    Ok(Some(cmd))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn search_variants() {
+        assert_eq!(
+            parse(r#"search "daft punk""#),
+            Ok(Some(Command::Search("daft punk".into())))
+        );
+        assert_eq!(
+            parse(":search daft punk"),
+            Ok(Some(Command::Search("daft punk".into())))
+        );
+        assert_eq!(
+            parse(r#"s"lofi beats""#),
+            Ok(Some(Command::Search("lofi beats".into())))
+        );
+        assert!(parse("search").is_err());
+    }
+
+    #[test]
+    fn download_commands() {
+        for (input, target) in [
+            ("download", DownloadTarget::Current),
+            (":download current", DownloadTarget::Current),
+            ("dl selected", DownloadTarget::Selected),
+            ("download all", DownloadTarget::All),
+            ("DOWNLOAD ALL", DownloadTarget::All),
+        ] {
+            assert_eq!(parse(input), Ok(Some(Command::Download(target))));
+        }
+        assert!(parse("download unknown").is_err());
+        assert!(parse("download all extra").is_err());
+        assert!(COMMAND_NAMES.contains(&"download"));
+    }
+
+    #[test]
+    fn simple_commands() {
+        assert_eq!(parse("play"), Ok(Some(Command::Play(None))));
+        assert_eq!(parse("play 3"), Ok(Some(Command::Play(Some(3)))));
+        assert!(parse("play 0").is_err());
+        assert_eq!(parse("q!"), Ok(Some(Command::Quit)));
+        assert_eq!(parse("pause"), Ok(Some(Command::Pause)));
+        assert_eq!(parse("   "), Ok(None));
+        assert!(parse("bogus").is_err());
+    }
+
+    #[test]
+    fn amounts() {
+        assert_eq!(
+            parse("vol 50"),
+            Ok(Some(Command::Volume(Amount::Abs(50.0))))
+        );
+        assert_eq!(
+            parse("vol -10"),
+            Ok(Some(Command::Volume(Amount::Delta(-10.0))))
+        );
+        assert_eq!(
+            parse("seek 1:30"),
+            Ok(Some(Command::Seek(Amount::Abs(90.0))))
+        );
+        assert_eq!(
+            parse("seek +15"),
+            Ok(Some(Command::Seek(Amount::Delta(15.0))))
+        );
+        assert!(parse("vol loud").is_err());
+    }
+
+    #[test]
+    fn artist_command() {
+        assert_eq!(parse("artist"), Ok(Some(Command::Artist)));
+        assert_eq!(parse(":ar"), Ok(Some(Command::Artist)));
+        assert_eq!(parse("lyrics"), Ok(Some(Command::Lyrics)));
+        assert_eq!(parse("similar"), Ok(Some(Command::Similar)));
+        assert_eq!(parse(":radio"), Ok(Some(Command::Similar)));
+        assert_eq!(parse("album"), Ok(Some(Command::Album(None))));
+        assert_eq!(
+            parse("album daft punk"),
+            Ok(Some(Command::Album(Some("daft punk".into()))))
+        );
+        assert_eq!(
+            parse("playlist lofi"),
+            Ok(Some(Command::PlaylistSearch("lofi".into())))
+        );
+        assert!(parse("playlist").is_err());
+        assert_eq!(parse("playlists"), Ok(Some(Command::ShowPlaylists)));
+        assert_eq!(parse("history"), Ok(Some(Command::ShowRecent)));
+        assert_eq!(parse("mostplayed"), Ok(Some(Command::ShowMostPlayed)));
+    }
+
+    #[test]
+    fn playlists() {
+        assert_eq!(
+            parse(r#"save "my mix""#),
+            Ok(Some(Command::Save("my mix".into())))
+        );
+        assert!(parse("save").is_err());
+        assert_eq!(
+            parse("save! my mix"),
+            Ok(Some(Command::SaveForce("my mix".into())))
+        );
+        assert_eq!(parse("savealbum"), Ok(Some(Command::SaveAlbum(None))));
+        assert_eq!(
+            parse(r#"savealbum "Abbey Road""#),
+            Ok(Some(Command::SaveAlbum(Some("Abbey Road".into()))))
+        );
+        assert_eq!(parse("saveresults"), Ok(Some(Command::SaveResults(None))));
+        assert_eq!(
+            parse(r#"saveresults "My Hits""#),
+            Ok(Some(Command::SaveResults(Some("My Hits".into()))))
+        );
+    }
+}
