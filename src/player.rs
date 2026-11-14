@@ -797,7 +797,7 @@ mod tests {
         track.artist = "../../%(title)s\\Artist".into();
         track.title = " /evil:\"*?<>|\n\0%(id)s ".into();
         let output = |track: &crate::model::Track| {
-            download_command(track, &Audio::default(), std::path::Path::new("music"))
+            download_command(track, &Audio::default(), std::path::Path::new("music"), Route::Plain)
                 .unwrap()
                 .get_args()
                 .find_map(|arg| arg.to_str()?.strip_prefix("--output=").map(str::to_owned))
@@ -851,7 +851,7 @@ mod tests {
         }
         assert!(!dir.exists());
         track.id = "_-abcDEF012".into();
-        assert!(download_command(&track, &Audio::default(), &dir).is_ok());
+        assert!(download_command(&track, &Audio::default(), &dir, Route::Plain).is_ok());
     }
 
     #[test]
