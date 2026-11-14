@@ -46,7 +46,7 @@ fn dim() -> Style {
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
-    let artwork_mode = app.mode == Mode::LyricsArtwork;
+    let artwork_mode = app.mode.has_cover();
     let [top, body, playing] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(3),
@@ -63,7 +63,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 body.width,
                 area.bottom().saturating_sub(body.y),
             );
-            draw_lyrics_artwork(f, app, artwork);
+            if app.mode == Mode::Artwork {
+                draw_artwork_only(f, app, artwork);
+            } else {
+                draw_lyrics_artwork(f, app, artwork);
+            }
         } else {
             draw_lyrics(f, app, body, LyricsLayout::Full);
         }
@@ -604,9 +608,18 @@ fn draw_playlists(f: &mut Frame, app: &mut App, area: Rect) {
         .iter()
         .enumerate()
         .map(|(i, (name, tracks))| {
+            /* playlists that follow YouTube Music get a marker */
+            let label = if app.is_linked(name) {
+                Line::from(vec![
+                    Span::raw(name.as_str()),
+                    Span::styled("  \u{21bb}", Style::new().fg(app.accent)),
+                ])
+            } else {
+                Line::from(name.as_str())
+            };
             Row::new(vec![
                 Cell::from(format!("{:>2}", i + 1)).style(dim()),
-                Cell::from(name.as_str()),
+                Cell::from(label),
                 Cell::from(format!("{}", tracks.len())).style(dim()),
             ])
         })
@@ -816,14 +829,15 @@ fn draw_lyrics_header(f: &mut Frame, app: &App, area: Rect) {
     let mut title = vec![
         Span::styled(" Drift", Style::new().fg(app.accent).bold()),
         Span::styled(
-            if app.mode == Mode::LyricsArtwork {
-                "  ·  Lyrics / cover"
-            } else {
-                "  ·  Lyrics"
+            match app.mode {
+                Mode::Artwork => "  ·  Cover",
+                Mode::LyricsArtwork => "  ·  Lyrics / cover",
+                _ => "  ·  Lyrics",
             },
             dim(),
         ),
     ];
+    let unsynced = unsynced && app.mode != Mode::Artwork;
     if unsynced {
         title.push(Span::styled("  ·  not synced", dim()));
     }
@@ -841,16 +855,23 @@ fn draw_lyrics_header(f: &mut Frame, app: &App, area: Rect) {
     }
     keys.push((
         "F",
-        if app.mode == Mode::LyricsArtwork {
-            "close"
-        } else {
-            "cover view"
+        match app.mode {
+            Mode::Lyrics => "cover",
+            Mode::Artwork => "cover + lyrics",
+            _ => "close",
         },
     ));
     keys.push(("Esc", "close"));
     if let Some(h) = hints(&keys, area.width.saturating_sub(30)) {
         f.render_widget(Paragraph::new(h), area);
     }
+}
+
+/* The cover on its own, as large as the window allows, with the track
+details and progress underneath. */
+fn draw_artwork_only(f: &mut Frame, app: &mut App, area: Rect) {
+    let area = area.inner(Margin::new(2, 1));
+    draw_cover_stack(f, app, area, true);
 }
 
 fn draw_lyrics_artwork(f: &mut Frame, app: &mut App, area: Rect) {
@@ -1071,6 +1092,11 @@ fn draw_progress(f: &mut Frame, app: &App, track: &Track, bar_row: Rect, time_ro
 /* Left column of the cover view. Everything is stacked and centered
 vertically: cover, gap, title, artist, progress bar, times. */
 fn draw_cover_track(f: &mut Frame, app: &mut App, area: Rect) {
+    draw_cover_stack(f, app, area, false);
+}
+
+/* `large` lets the cover take all the room there is (the cover-only view). */
+fn draw_cover_stack(f: &mut Frame, app: &mut App, area: Rect, large: bool) {
     if area.is_empty() {
         return;
     }
@@ -1089,7 +1115,11 @@ fn draw_cover_track(f: &mut Frame, app: &mut App, area: Rect) {
     // taller than width / 2. Take 3/4 of that so it doesn't hog the column,
     // and drop the cover completely when the terminal is really short.
     let max_art = area.height.saturating_sub(INFO_ROWS).min(area.width / 2);
-    let art_h = if max_art >= 4 { max_art * 3 / 4 } else { 0 };
+    let art_h = match max_art {
+        0..=3 => 0,
+        n if large => n,
+        n => n * 3 / 4,
+    };
     let used = if art_h > 0 {
         art_h + INFO_ROWS
     } else {
@@ -1473,6 +1503,13 @@ const CMD_INFO: &[(&str, &str)] = &[
     ),
     ("playlist", "search YouTube Music playlists"),
     ("lyrics", "show or hide the lyrics panel"),
+    (
+        "link",
+        "keep a YouTube Music playlist in sync  ·  link URL [name]",
+    ),
+    ("unlink", "stop syncing a playlist (its songs stay)"),
+    ("sync", "refresh linked playlists and your library now"),
+    ("autoplay", "keep playing similar songs  ·  on | off"),
     ("help", "show key bindings"),
 ];
 
@@ -1810,7 +1847,7 @@ const HELP_PLAY: HelpEntries = &[
     ("s  r", "toggle shuffle / cycle repeat"),
     (
         "L  F",
-        "lyrics panel / cycle fullscreen lyrics + cover (Esc closes)",
+        "lyrics panel / cycle fullscreen lyrics, cover, cover + lyrics (Esc closes)",
     ),
     (
         "ga  or  :artist",
@@ -1904,6 +1941,18 @@ const HELP_CMDS: HelpEntries = &[
     ),
     (":addto n", "add the selected track to playlist n"),
     (":import URL", "load a YouTube / YT Music playlist"),
+    (
+        ":link URL [name]",
+        "follow a YouTube Music playlist: it is saved here and kept up to date",
+    ),
+    (
+        ":sync  :unlink name",
+        "refresh linked playlists now / stop following one",
+    ),
+    (
+        ":autoplay [on|off]",
+        "when everything has played, continue with similar songs",
+    ),
     (":artist", "same as ga"),
     (":similar", "same as gs (also :radio)"),
     (":album [q]", "same as gb, or search albums"),
@@ -2258,6 +2307,20 @@ mod tests {
         let press = |app: &mut App, key| app.on_key(KeyEvent::new(key, KeyModifiers::NONE));
         press(app, KeyCode::Char('F'));
         assert!(app.mode == Mode::Lyrics);
+        // F: lyrics -> cover on its own -> cover and lyrics -> player
+        press(app, KeyCode::Char('F'));
+        assert!(app.mode == Mode::Artwork);
+        let mut solo = Terminal::new(TestBackend::new(120, 32)).unwrap();
+        solo.draw(|f| draw(f, app)).unwrap();
+        assert!(text(&solo).contains("Cover art unavailable"));
+        assert!(text(&solo).contains("Cover Song"));
+        assert!(text(&solo).contains("0:27"));
+        assert!(!text(&solo).contains("First lyric"));
+        assert!(!text(&solo).contains("Now Playing"));
+        for (width, height) in [(80, 24), (50, 20), (20, 6)] {
+            let mut small = Terminal::new(TestBackend::new(width, height)).unwrap();
+            small.draw(|f| draw(f, app)).unwrap();
+        }
         press(app, KeyCode::Char('F'));
         assert!(app.mode == Mode::LyricsArtwork);
 

@@ -1,6 +1,6 @@
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::mpsc::Sender;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -19,6 +19,7 @@ use crate::mpris::{Cmd, Mpris};
 use crate::player::{self, Player, PlayerEvent};
 use crate::session::Session;
 use crate::store::Store;
+use crate::sync::{self, Links};
 use crate::ytmusic::{self, Kind, Page};
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::StatefulProtocol;
@@ -68,7 +69,26 @@ pub enum AppEvent {
         id: String,
         result: Result<String, String>,
     },
+    Autoplay {
+        seed: String,
+        result: Result<Vec<Track>, String>,
+    },
+    Synced {
+        manual: bool,
+        report: sync::Report,
+    },
+    Linked {
+        id: String,
+        name: String,
+        result: Result<Vec<Track>, String>,
+    },
 }
+
+/* YouTube stream links stay valid for hours; forget them well before that. */
+const STREAM_TTL: Duration = Duration::from_secs(3 * 60 * 60);
+const STREAM_KEEP: usize = 64;
+/* how long the cursor rests on a song before its stream is looked up */
+const HOVER_DWELL: Duration = Duration::from_millis(900);
 
 const FIRST_PAGE: usize = 20;
 const NEXT_PAGE: usize = 10;
@@ -115,12 +135,29 @@ pub enum Mode {
     Menu,
     Info,
     Lyrics,
+    /* fullscreen cover art on its own */
+    Artwork,
     LyricsArtwork,
 }
 
 impl Mode {
     pub fn is_lyrics(self) -> bool {
-        matches!(self, Self::Lyrics | Self::LyricsArtwork)
+        matches!(self, Self::Lyrics | Self::Artwork | Self::LyricsArtwork)
+    }
+
+    /* views that show the cover and hide the bottom player bar */
+    pub fn has_cover(self) -> bool {
+        matches!(self, Self::Artwork | Self::LyricsArtwork)
+    }
+
+    /* F cycles: lyrics -> cover art -> cover art and lyrics -> player */
+    pub fn next_fullscreen(self) -> Self {
+        match self {
+            Self::Lyrics => Self::Artwork,
+            Self::Artwork => Self::LyricsArtwork,
+            Self::LyricsArtwork => Self::Normal,
+            _ => Self::Lyrics,
+        }
     }
 }
 
@@ -290,7 +327,21 @@ pub struct App {
     fail_streak: u8,
     want: Option<String>,
     fetching: Option<String>,
-    resolving: Option<String>,
+    resolving: HashSet<String>,
+    /* stream links looked up ahead of time: id -> (url, when) */
+    streams: HashMap<String, (String, Instant)>,
+    /* the song now loading came from `streams` and may have expired */
+    stream_cached: bool,
+    prewarm: bool,
+    prewarm_selected: bool,
+    hover: Option<(String, Instant, bool)>,
+    autoplay_seed: Option<String>,
+    pub links: Links,
+    syncing: bool,
+    last_sync: Instant,
+    sync_every: Option<Duration>,
+    library: bool,
+    sync_warned: bool,
     audio: Audio,
     result_cursor: Option<usize>,
     buffered: Vec<Track>,
@@ -332,6 +383,7 @@ impl App {
         let (cfg, cfg_warning) = Config::load();
         let (history_data, history_warning) = History::load();
         let p = cfg.playback;
+        let yt = cfg.youtube;
         let warning = cfg_warning.or(store_warning).or(history_warning);
         let seed = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -405,7 +457,20 @@ impl App {
             fail_streak: 0,
             want: None,
             fetching: None,
-            resolving: None,
+            resolving: HashSet::new(),
+            streams: HashMap::new(),
+            stream_cached: false,
+            /* tests must not start yt-dlp or reach the network on their own */
+            prewarm: yt.prewarm && !cfg!(test),
+            prewarm_selected: yt.prewarm_selected && !cfg!(test),
+            hover: None,
+            autoplay_seed: None,
+            links: Links::load(),
+            syncing: false,
+            last_sync: Instant::now(),
+            sync_every: yt.sync_interval().filter(|_| !cfg!(test)),
+            library: yt.library,
+            sync_warned: false,
             audio: cfg.audio.clone(),
             result_cursor: None,
             buffered: Vec::new(),
@@ -420,7 +485,7 @@ impl App {
             owns_session,
             seek_step: p.seek_step,
             volume_step: p.volume_step,
-            autoplay: p.autoplay,
+            autoplay: p.autoplay && !cfg!(test),
             popular_first: cfg.artist.popular_first,
             resume: None,
             saved: String::new(),
@@ -451,6 +516,9 @@ impl App {
         match warning {
             Some(w) => app.error(w),
             None => app.info("Hello! Press / to search, and ? for help"),
+        }
+        if yt.sync && !cfg!(test) {
+            app.start_sync(false);
         }
         app
     }
@@ -511,6 +579,12 @@ impl App {
         self.sync_cover();
         self.sync_mpris();
         self.sync_discord();
+        self.prewarm_hover();
+        if let Some(every) = self.sync_every {
+            if !self.syncing && self.last_sync.elapsed() >= every {
+                self.start_sync(false);
+            }
+        }
         /* open the picker once nothing else is being typed, so keys aren't hijacked */
         if self.mode == Mode::Normal && !self.picks.is_empty() {
             self.mode = Mode::CollectionPick;
@@ -636,7 +710,7 @@ impl App {
             Mode::ConfirmDelete => self.key_confirm_delete(key),
             Mode::Menu => self.key_menu(key),
             Mode::Info => self.key_info(key),
-            Mode::Lyrics | Mode::LyricsArtwork => self.key_lyrics(key),
+            Mode::Lyrics | Mode::Artwork | Mode::LyricsArtwork => self.key_lyrics(key),
             Mode::Normal => self.key_normal(key),
         }
     }
@@ -1116,13 +1190,7 @@ impl App {
         let scroll = self.lyrics_scroll;
         match key.code {
             KeyCode::Esc | KeyCode::Char('q' | 'L') => self.mode = Mode::Normal,
-            KeyCode::Char('F') => {
-                self.mode = if self.mode == Mode::Lyrics {
-                    Mode::LyricsArtwork
-                } else {
-                    Mode::Normal
-                };
-            }
+            KeyCode::Char('F') => self.mode = self.mode.next_fullscreen(),
             KeyCode::Char('D') => self.download(DownloadTarget::Current),
             KeyCode::Char('j') | KeyCode::Down => self.lyrics_scroll = scroll.saturating_add(1),
             KeyCode::Char('k') | KeyCode::Up => self.lyrics_scroll = scroll.saturating_sub(1),
@@ -1171,7 +1239,7 @@ impl App {
     }
 
     fn sync_cover(&mut self) {
-        if self.mode != Mode::LyricsArtwork || self.play_state == PlayState::Stopped {
+        if !self.mode.has_cover() || self.play_state == PlayState::Stopped {
             return;
         }
         let Some(id) = self.now_track().map(|track| track.id.clone()) else {
@@ -1497,6 +1565,19 @@ impl App {
             Command::Album(None) => self.go_album(),
             Command::PlaylistSearch(q) => self.start_collection_search(q, Kind::Playlist),
             Command::Lyrics => self.lyrics_panel = !self.lyrics_panel,
+            Command::Link(url, name) => self.start_link(url, name),
+            Command::Unlink(name) => self.unlink(&name),
+            Command::SyncNow => self.start_sync(true),
+            Command::Autoplay(on) => {
+                self.autoplay = on.unwrap_or(!self.autoplay);
+                if !self.autoplay {
+                    self.autoplay_seed = None;
+                }
+                self.info(format!(
+                    "Autoplay: {}",
+                    if self.autoplay { "on" } else { "off" }
+                ));
+            }
             Command::Help => self.open_help(),
         }
     }
@@ -1998,6 +2079,9 @@ impl App {
             }
             AppEvent::Audio { id, result } => self.on_audio(id, result),
             AppEvent::Stream { id, result } => self.on_stream(id, result),
+            AppEvent::Autoplay { seed, result } => self.on_autoplay(seed, result),
+            AppEvent::Synced { manual, report } => self.on_synced(manual, report),
+            AppEvent::Linked { id, name, result } => self.on_linked(id, name, result),
             AppEvent::Player(generation, pe) => {
                 if generation == self.player_gen {
                     self.on_player(pe);
@@ -2093,8 +2177,10 @@ impl App {
             PlayerEvent::FileLoaded => {
                 self.play_state = PlayState::Playing;
                 self.fail_streak = 0;
+                self.stream_cached = false;
                 self.record_play();
                 self.prefetch_next();
+                self.prewarm_next();
                 if let Some((id, pos)) = self.resume.take() {
                     let ok = self.now_track().is_some_and(|t| {
                         t.id == id && t.duration.is_none_or(|d| pos < f64::from(d) - 1.0)
@@ -2111,6 +2197,16 @@ impl App {
                 }
             }
             PlayerEvent::LoadError(msg) => {
+                /* a remembered stream link can have expired: look it up again once */
+                if std::mem::take(&mut self.stream_cached) {
+                    if let Some(id) = self.now_track().map(|t| t.id.clone()) {
+                        self.streams.remove(&id);
+                        self.want = Some(id.clone());
+                        self.play_state = PlayState::Loading;
+                        self.resolve_stream(&id);
+                        return;
+                    }
+                }
                 let name = self.now_track().map(Track::label).unwrap_or_default();
                 self.fail_streak += 1;
                 if self.fail_streak >= 3 {
@@ -2159,19 +2255,119 @@ impl App {
 
     fn load_track(&mut self, id: &str, duration: Option<u32>) {
         self.want = Some(id.to_string());
+        self.autoplay_seed = None;
+        self.stream_cached = false;
         match player::cached_audio(id) {
             Some(path) => self.on_audio(id.to_string(), Ok(path)),
             None if self.audio.should_download(duration) => self.fetch_audio(id),
-            None => self.resolve_stream(id),
+            None => match self.fresh_stream(id) {
+                /* already looked up while the previous song played */
+                Some(url) => {
+                    self.stream_cached = true;
+                    self.play_stream(Ok(url));
+                }
+                None => self.resolve_stream(id),
+            },
         }
+    }
+
+    fn fresh_stream(&self, id: &str) -> Option<String> {
+        self.streams
+            .get(id)
+            .filter(|(_, at)| at.elapsed() < STREAM_TTL)
+            .map(|(url, _)| url.clone())
+    }
+
+    fn remember_stream(&mut self, id: &str, url: &str) {
+        if self.streams.len() >= STREAM_KEEP {
+            self.streams.retain(|_, (_, at)| at.elapsed() < STREAM_TTL);
+        }
+        if self.streams.len() >= STREAM_KEEP {
+            self.streams.clear();
+        }
+        self.streams
+            .insert(id.to_string(), (url.to_string(), Instant::now()));
+    }
+
+    /* What plays after the current song, when that can be known ahead. */
+    fn upcoming(&self) -> Option<&Track> {
+        if self.shuffle || self.repeat == RepeatMode::One {
+            return None;
+        }
+        let len = self.queue.len();
+        let queued = match self.current {
+            Some(c) if c + 1 < len => Some(c + 1),
+            Some(_) => None,
+            None if len > 0 => Some(0),
+            None => None,
+        };
+        if let Some(i) = queued {
+            return self.queue.get(i);
+        }
+        let cursor = self
+            .result_cursor
+            .filter(|_| self.on_radio || self.resume_radio || self.autoplay)?;
+        self.radio.get(cursor + 1)
+    }
+
+    /* Look up a song's stream now so playing it later starts at once. */
+    fn prewarm_id(&mut self, id: &str) {
+        if self.fresh_stream(id).is_none() && player::cached_audio(id).is_none() {
+            self.resolve_stream(id);
+        }
+    }
+
+    fn prewarm_next(&mut self) {
+        if !self.prewarm {
+            return;
+        }
+        let Some(next) = self.upcoming() else {
+            return;
+        };
+        /* downloaded songs are handled by prefetch_next */
+        if self.audio.should_download(next.duration) {
+            return;
+        }
+        let id = next.id.clone();
+        self.prewarm_id(&id);
+    }
+
+    fn prewarm_hover(&mut self) {
+        if !self.prewarm_selected || self.mode != Mode::Normal || self.resolving.len() >= 2 {
+            return;
+        }
+        let Some(track) = self.selected_track() else {
+            self.hover = None;
+            return;
+        };
+        let same = self
+            .hover
+            .as_ref()
+            .is_some_and(|(id, ..)| *id == track.id);
+        if !same {
+            self.hover = Some((track.id, Instant::now(), false));
+            return;
+        }
+        let Some((_, since, done)) = self.hover.as_mut() else {
+            return;
+        };
+        if *done || since.elapsed() < HOVER_DWELL {
+            return;
+        }
+        *done = true;
+        if self.audio.should_download(track.duration) {
+            return;
+        }
+        /* have mpv running too, so the first song doesn't wait for it */
+        let _ = self.ensure_player();
+        self.prewarm_id(&track.id);
     }
 
     /* Start playing from the network right away; no full download first. */
     fn resolve_stream(&mut self, id: &str) {
-        if self.resolving.as_deref() == Some(id) {
+        if !self.resolving.insert(id.to_string()) {
             return;
         }
-        self.resolving = Some(id.to_string());
         let tx = self.tx.clone();
         let id = id.to_string();
         let audio = self.audio.clone();
@@ -2182,12 +2378,18 @@ impl App {
     }
 
     fn on_stream(&mut self, id: String, result: Result<String, String>) {
-        if self.resolving.as_deref() == Some(id.as_str()) {
-            self.resolving = None;
+        self.resolving.remove(&id);
+        if let Ok(url) = &result {
+            self.remember_stream(&id, url);
         }
         if self.want.as_deref() != Some(id.as_str()) {
             return;
         }
+        self.stream_cached = false;
+        self.play_stream(result);
+    }
+
+    fn play_stream(&mut self, result: Result<String, String>) {
         self.want = None;
         match result {
             Ok(url) => {
@@ -2402,6 +2604,8 @@ impl App {
 
     fn stop_playback(&mut self) {
         self.want = None;
+        self.autoplay_seed = None;
+        self.stream_cached = false;
         self.resume = None;
         if let Some(p) = self.player.as_mut() {
             let _ = p.stop();
@@ -2499,14 +2703,262 @@ impl App {
         let cursor = self
             .result_cursor
             .filter(|_| self.on_radio || self.resume_radio || self.autoplay);
+        /* autoplay: once everything has played, carry on with similar songs */
+        let seed = self
+            .now_track()
+            .filter(|_| self.autoplay && self.repeat == RepeatMode::Off)
+            .cloned();
         match cursor.and_then(|c| self.next_in_radio(c)) {
             Some(i) => self.play_radio(i),
             None if auto => {
                 self.stop_playback();
-                self.info("Finished playing");
+                match seed {
+                    Some(track) => self.start_autoplay(track),
+                    None => self.info("Finished playing"),
+                }
             }
-            None => self.info("End of the list"),
+            None => match seed {
+                Some(track) => self.start_autoplay(track),
+                None => self.info("End of the list"),
+            },
         }
+    }
+
+    fn start_autoplay(&mut self, seed: Track) {
+        if self.autoplay_seed.as_deref() == Some(seed.id.as_str()) {
+            return;
+        }
+        self.autoplay_seed = Some(seed.id.clone());
+        self.info(format!(
+            "Autoplay: finding songs like \u{201c}{}\u{201d}",
+            seed.title
+        ));
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let result = ytmusic::radio(&seed.id);
+            let _ = tx.send(AppEvent::Autoplay {
+                seed: seed.id,
+                result,
+            });
+        });
+    }
+
+    fn on_autoplay(&mut self, seed: String, result: Result<Vec<Track>, String>) {
+        /* stale if something else was played or stopped in the meantime */
+        if self.autoplay_seed.as_deref() != Some(seed.as_str()) {
+            return;
+        }
+        self.autoplay_seed = None;
+        let tracks = match result {
+            Ok(tracks) => tracks,
+            Err(e) => return self.error(format!("Autoplay failed: {e}")),
+        };
+        let known: HashSet<&str> = self
+            .queue
+            .iter()
+            .chain(&self.radio)
+            .map(|t| t.id.as_str())
+            .collect();
+        let mut fresh: Vec<Track> = tracks
+            .iter()
+            .filter(|t| t.id != seed && !known.contains(t.id.as_str()))
+            .cloned()
+            .collect();
+        /* nearly everything was heard already: better repeats than silence */
+        if fresh.len() < 5 {
+            fresh = tracks.into_iter().filter(|t| t.id != seed).collect();
+        }
+        if fresh.is_empty() {
+            return self.info("Autoplay found nothing else to play");
+        }
+        self.radio = fresh;
+        self.radio_played.clear();
+        self.play_radio(0);
+    }
+
+    /* ---- playlists that follow YouTube Music ---- */
+
+    pub fn is_linked(&self, name: &str) -> bool {
+        self.links.links.contains_key(name)
+    }
+
+    /* local playlists a sync must never overwrite */
+    fn unlinked_names(&self) -> BTreeSet<String> {
+        self.store
+            .playlists
+            .keys()
+            .filter(|name| !self.links.links.contains_key(*name))
+            .cloned()
+            .collect()
+    }
+
+    fn save_links(&mut self) {
+        if let Err(e) = self.links.save() {
+            self.error(format!("Could not save playlist links: {e:#}"));
+        }
+    }
+
+    fn start_sync(&mut self, manual: bool) {
+        if self.syncing {
+            if manual {
+                self.info("Already syncing\u{2026}");
+            }
+            return;
+        }
+        self.last_sync = Instant::now();
+        let cookies = self.audio.cookies().map(str::to_string);
+        let library = self.library && cookies.is_some();
+        if self.links.is_empty() && !library {
+            if manual {
+                self.error(
+                    "Nothing to sync yet \u{2014} :link <playlist URL>, or set cookies_from_browser to sync your library",
+                );
+            }
+            return;
+        }
+        self.syncing = true;
+        if manual {
+            self.info("Syncing playlists with YouTube Music\u{2026}");
+        }
+        let (links, taken, tx) = (self.links.clone(), self.unlinked_names(), self.tx.clone());
+        std::thread::spawn(move || {
+            let report = sync::run(links, taken, cookies, library);
+            let _ = tx.send(AppEvent::Synced { manual, report });
+        });
+    }
+
+    fn on_synced(&mut self, manual: bool, report: sync::Report) {
+        self.syncing = false;
+        /* take over the library playlists found during this pass */
+        let mut linked = false;
+        for (name, id) in &report.links.links {
+            if self.links.has_id(id)
+                || self.links.ignored.contains(id)
+                || self.links.links.contains_key(name)
+                || self.store.playlists.contains_key(name)
+            {
+                continue;
+            }
+            self.links.links.insert(name.clone(), id.clone());
+            linked = true;
+        }
+        if linked {
+            self.save_links();
+        }
+
+        let (mut synced, mut updated, mut failed) = (0, 0, 0);
+        let added = report.added;
+        let mut problem = report.library_error;
+        for (name, result) in report.lists {
+            /* unlinked or deleted while the sync was running */
+            if !self.links.links.contains_key(&name) {
+                continue;
+            }
+            match result {
+                Ok(tracks) => {
+                    synced += 1;
+                    if self.store.playlists.get(&name) != Some(&tracks) {
+                        self.store.playlists.insert(name, tracks);
+                        updated += 1;
+                    }
+                }
+                Err(e) => {
+                    failed += 1;
+                    problem.get_or_insert_with(|| format!("{name}: {e}"));
+                }
+            }
+        }
+        if updated > 0 && self.persist() {
+            let sel = self.selected();
+            self.set_selected(sel);
+        }
+        /* background syncs complain once, not every half hour */
+        let quiet = !manual && self.sync_warned;
+        match problem {
+            Some(e) if !quiet => {
+                self.sync_warned = true;
+                self.error(format!(
+                    "Sync problem: {e} ({synced} synced, {failed} failed)"
+                ));
+            }
+            _ if manual || updated > 0 => self.info(format!(
+                "Synced {synced} playlists with YouTube Music ({updated} updated, {added} new)"
+            )),
+            _ => {}
+        }
+    }
+
+    fn start_link(&mut self, url: String, name: Option<String>) {
+        let Some(id) = ytmusic::playlist_id(&url) else {
+            return self
+                .error("That doesn't look like a playlist URL (it needs a list=\u{2026} part)");
+        };
+        if let Some((existing, _)) = self.links.links.iter().find(|(_, linked)| **linked == id) {
+            let msg = format!("Already linked as \u{201c}{existing}\u{201d} \u{2014} :sync refreshes it");
+            return self.info(msg);
+        }
+        self.busy = Some("Linking playlist".into());
+        let cookies = self.audio.cookies().map(str::to_string);
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let cookies = cookies.as_deref();
+            let result = ytmusic::playlist_tracks(&id, cookies);
+            let name = name
+                .or_else(|| {
+                    result
+                        .is_ok()
+                        .then(|| ytmusic::playlist_title(&id, cookies))
+                        .flatten()
+                })
+                .unwrap_or_else(|| format!("Playlist {id}"));
+            let _ = tx.send(AppEvent::Linked { id, name, result });
+        });
+    }
+
+    fn on_linked(&mut self, id: String, name: String, result: Result<Vec<Track>, String>) {
+        self.busy = None;
+        let tracks = match result {
+            Ok(tracks) => tracks,
+            Err(e) => return self.error(format!("Could not link the playlist: {e}")),
+        };
+        if self.links.has_id(&id) {
+            return;
+        }
+        let name = self.links.free_name(&name, &self.unlinked_names());
+        let n = tracks.len();
+        self.links.ignored.remove(&id);
+        self.links.links.insert(name.clone(), id);
+        self.save_links();
+        self.store.playlists.insert(name.clone(), tracks);
+        if self.persist() {
+            self.info(format!(
+                "Linked \u{201c}{name}\u{201d} ({n} songs) \u{2014} it now follows YouTube Music"
+            ));
+            let sel = self.selected();
+            self.set_selected(sel);
+        }
+    }
+
+    fn unlink(&mut self, name: &str) {
+        let lower = name.to_lowercase();
+        let key = self
+            .links
+            .links
+            .keys()
+            .find(|key| key.to_lowercase() == lower)
+            .cloned()
+            .or_else(|| self.store.resolve(name).filter(|n| self.is_linked(n)));
+        let Some(key) = key else {
+            return self.error(format!("no linked playlist named '{name}'"));
+        };
+        if let Some(id) = self.links.links.remove(&key) {
+            /* or the library sync would link it right back */
+            self.links.ignored.insert(id);
+        }
+        self.save_links();
+        self.info(format!(
+            "\u{201c}{key}\u{201d} no longer follows YouTube Music (its songs stay here)"
+        ));
     }
 
     fn next_in_radio(&mut self, cursor: usize) -> Option<usize> {
@@ -2978,6 +3430,11 @@ impl App {
             if self.open.as_deref() == Some(name) {
                 self.open = None;
             }
+            if let Some(id) = self.links.links.remove(name) {
+                /* a deleted library playlist must not come back on the next sync */
+                self.links.ignored.insert(id);
+                self.save_links();
+            }
             self.info(format!("Deleted playlist \u{201c}{name}\u{201d}"));
             let sel = self.selected();
             self.set_selected(sel);
@@ -3079,7 +3536,12 @@ mod tests {
         app.close_menu();
 
         app.audio.download_dir.clear();
-        for mode in [Mode::Normal, Mode::Lyrics, Mode::LyricsArtwork] {
+        for mode in [
+            Mode::Normal,
+            Mode::Lyrics,
+            Mode::Artwork,
+            Mode::LyricsArtwork,
+        ] {
             app.mode = mode;
             app.status = None;
             press(app, KeyCode::Char('D'));
@@ -3330,6 +3792,327 @@ mod tests {
         app.keymap = Keymap::default();
     }
 
+    fn ids(tracks: &[Track]) -> Vec<&str> {
+        tracks.iter().map(|t| t.id.as_str()).collect()
+    }
+
+    fn check_stream_cache(app: &mut App) {
+        app.position = 0.0;
+        app.shuffle = false;
+        app.repeat = RepeatMode::Off;
+        app.on_radio = false;
+        app.resume_radio = false;
+        app.result_cursor = None;
+        app.radio.clear();
+        app.queue = vec![track("aaaaaaaaaaa", "A"), track("bbbbbbbbbbb", "B")];
+        app.current = Some(0);
+
+        // what plays next: the queue first, then the list being played
+        assert_eq!(app.upcoming().map(|t| t.title.as_str()), Some("B"));
+        app.current = Some(1);
+        assert!(app.upcoming().is_none());
+        app.radio = vec![track("rrrrrrrrrr1", "R1"), track("rrrrrrrrrr2", "R2")];
+        app.result_cursor = Some(0);
+        assert!(app.upcoming().is_none());
+        app.on_radio = true;
+        assert_eq!(app.upcoming().map(|t| t.title.as_str()), Some("R2"));
+        app.result_cursor = Some(1);
+        assert!(app.upcoming().is_none());
+        app.result_cursor = Some(0);
+        app.shuffle = true;
+        assert!(app.upcoming().is_none());
+        app.shuffle = false;
+        app.repeat = RepeatMode::One;
+        assert!(app.upcoming().is_none());
+        app.repeat = RepeatMode::Off;
+        app.on_radio = false;
+        app.result_cursor = None;
+        app.radio.clear();
+
+        // a stream looked up ahead of time is remembered, not played
+        app.want = None;
+        app.play_state = PlayState::Stopped;
+        app.status = None;
+        app.streams.clear();
+        app.fail_streak = 0;
+        app.resolving.clear();
+        app.resolving.insert("bbbbbbbbbbb".into());
+        app.on_stream("bbbbbbbbbbb".into(), Ok("https://stream/b".into()));
+        assert!(app.resolving.is_empty());
+        assert_eq!(
+            app.fresh_stream("bbbbbbbbbbb").as_deref(),
+            Some("https://stream/b")
+        );
+        assert!(app.play_state == PlayState::Stopped && app.want.is_none());
+        // a failed lookup for a song nobody asked for stays quiet
+        app.on_stream("ccccccccccc".into(), Err("blocked".into()));
+        assert!(app.status.is_none() && app.fresh_stream("ccccccccccc").is_none());
+        assert_eq!(app.fail_streak, 0);
+
+        // links that are too old are not used
+        if let Some(old) = Instant::now().checked_sub(STREAM_TTL + Duration::from_secs(1)) {
+            app.streams
+                .insert("ddddddddddd".into(), ("https://stream/d".into(), old));
+            assert!(app.fresh_stream("ddddddddddd").is_none());
+        }
+        for i in 0..STREAM_KEEP * 2 {
+            app.remember_stream(&format!("id{i:09}"), "https://stream/x");
+        }
+        assert!(app.streams.len() <= STREAM_KEEP);
+        assert!(app.fresh_stream(&format!("id{:09}", STREAM_KEEP * 2 - 1)).is_some());
+
+        // a remembered link that no longer works is looked up again instead
+        // of counting as a failed song
+        app.current = Some(0);
+        app.play_state = PlayState::Playing;
+        app.fail_streak = 0;
+        app.streams
+            .insert("aaaaaaaaaaa".into(), ("https://stream/a".into(), Instant::now()));
+        app.stream_cached = true;
+        app.on_player(PlayerEvent::LoadError("HTTP 403".into()));
+        assert_eq!(app.want.as_deref(), Some("aaaaaaaaaaa"));
+        assert!(app.play_state == PlayState::Loading);
+        assert!(!app.stream_cached && app.fail_streak == 0);
+        assert!(app.fresh_stream("aaaaaaaaaaa").is_none());
+        assert_eq!(app.current, Some(0));
+        assert!(app.resolving.contains("aaaaaaaaaaa"));
+
+        app.stop_playback();
+        app.streams.clear();
+        app.resolving.clear();
+        app.status = None;
+    }
+
+    fn check_autoplay(app: &mut App) {
+        assert!(!app.autoplay, "tests start with autoplay off");
+        app.run_command("autoplay on");
+        assert!(app.autoplay);
+        app.run_command("autoplay");
+        assert!(!app.autoplay);
+
+        app.on_radio = false;
+        app.radio.clear();
+        app.result_cursor = None;
+        app.queue = vec![track("aaaaaaaaaaa", "A")];
+        app.current = Some(0);
+        app.play_state = PlayState::Stopped;
+        let similar = |n: usize| -> Vec<Track> {
+            let mut list = vec![track("seed0000000", "Seed"), track("aaaaaaaaaaa", "A")];
+            list.extend((0..n).map(|i| track(&format!("new{i:08}"), &format!("N{i}"))));
+            list
+        };
+
+        // an answer nobody is waiting for is dropped
+        app.autoplay_seed = Some("other000000".into());
+        app.on_event(AppEvent::Autoplay {
+            seed: "seed0000000".into(),
+            result: Ok(similar(6)),
+        });
+        assert!(app.radio.is_empty() && app.play_state == PlayState::Stopped);
+        assert_eq!(app.autoplay_seed.as_deref(), Some("other000000"));
+
+        // similar songs continue playback, without the seed or songs already queued
+        app.autoplay_seed = Some("seed0000000".into());
+        app.on_event(AppEvent::Autoplay {
+            seed: "seed0000000".into(),
+            result: Ok(similar(6)),
+        });
+        assert!(app.autoplay_seed.is_none());
+        assert_eq!(app.radio.len(), 6);
+        assert!(!ids(&app.radio).contains(&"seed0000000"));
+        assert!(!ids(&app.radio).contains(&"aaaaaaaaaaa"));
+        assert!(app.on_radio && app.play_state == PlayState::Loading);
+        assert_eq!(now_title(app), Some("N0"));
+        assert_eq!(app.want.as_deref(), Some("new00000000"));
+
+        // with almost nothing new, already heard songs are better than silence
+        app.stop_playback();
+        app.radio.clear();
+        app.autoplay_seed = Some("seed0000000".into());
+        app.on_event(AppEvent::Autoplay {
+            seed: "seed0000000".into(),
+            result: Ok(similar(2)),
+        });
+        assert_eq!(ids(&app.radio), ["aaaaaaaaaaa", "new00000000", "new00000001"]);
+
+        // playing something else cancels a pending autoplay
+        app.autoplay_seed = Some("seed0000000".into());
+        app.play_radio(1);
+        assert!(app.autoplay_seed.is_none());
+
+        app.stop_playback();
+        app.autoplay_seed = Some("seed0000000".into());
+        app.status = None;
+        app.on_event(AppEvent::Autoplay {
+            seed: "seed0000000".into(),
+            result: Err("offline".into()),
+        });
+        assert!(app.autoplay_seed.is_none());
+        assert!(app
+            .status
+            .as_ref()
+            .is_some_and(|s| s.level == Level::Error && s.text.contains("offline")));
+        assert!(app.play_state == PlayState::Stopped);
+
+        app.on_radio = false;
+        app.radio.clear();
+        app.result_cursor = None;
+        app.resolving.clear();
+        app.status = None;
+    }
+
+    fn check_playlist_sync(app: &mut App) {
+        let report = |links: &[(&str, &str)],
+                      lists: Vec<(&str, Result<Vec<Track>, String>)>,
+                      library_error: Option<&str>| {
+            let mut found = Links::default();
+            for (name, id) in links {
+                found.links.insert(name.to_string(), id.to_string());
+            }
+            sync::Report {
+                links: found,
+                added: 0,
+                lists: lists
+                    .into_iter()
+                    .map(|(name, result)| (name.to_string(), result))
+                    .collect(),
+                library_error: library_error.map(str::to_string),
+            }
+        };
+        let (a, b, c) = (
+            track("aaaaaaaaaaa", "A"),
+            track("bbbbbbbbbbb", "B"),
+            track("ccccccccccc", "C"),
+        );
+        app.links = Links::default();
+        app.store.playlists.clear();
+        app.store.playlists.insert("Local".into(), vec![a.clone()]);
+        app.open = None;
+        app.view = View::Playlists;
+
+        // nothing linked and no account: a manual sync says so
+        app.status = None;
+        app.run_command("sync");
+        assert!(!app.syncing);
+        assert!(app.status.as_ref().is_some_and(|s| s.level == Level::Error));
+        app.status = None;
+        app.busy = None;
+        app.run_command("link https://music.youtube.com/watch?v=dQw4w9WgXcQ");
+        assert!(app.busy.is_none());
+        assert!(app.status.as_ref().is_some_and(|s| s.level == Level::Error));
+
+        // linking never overwrites a playlist made here
+        app.busy = Some("Linking playlist".into());
+        app.on_event(AppEvent::Linked {
+            id: "PLlinked".into(),
+            name: "Local".into(),
+            result: Ok(vec![b.clone(), c.clone()]),
+        });
+        assert!(app.busy.is_none());
+        assert_eq!(ids(&app.store.playlists["Local"]), ["aaaaaaaaaaa"]);
+        assert_eq!(
+            ids(&app.store.playlists["Local (YouTube)"]),
+            ["bbbbbbbbbbb", "ccccccccccc"]
+        );
+        assert!(app.is_linked("Local (YouTube)") && !app.is_linked("Local"));
+        assert_eq!(Links::load(), app.links);
+        // linking the same playlist twice changes nothing
+        app.on_event(AppEvent::Linked {
+            id: "PLlinked".into(),
+            name: "Again".into(),
+            result: Ok(vec![a.clone()]),
+        });
+        assert_eq!(app.links.links.len(), 1);
+        assert!(!app.store.playlists.contains_key("Again"));
+        app.on_event(AppEvent::Linked {
+            id: "PLbroken".into(),
+            name: "Broken".into(),
+            result: Err("private".into()),
+        });
+        assert!(!app.is_linked("Broken"));
+
+        // a sync replaces linked playlists, adopts new library playlists and
+        // leaves everything else alone
+        app.syncing = true;
+        app.on_event(AppEvent::Synced {
+            manual: true,
+            report: report(
+                &[("Local (YouTube)", "PLlinked"), ("Fresh", "PLfresh")],
+                vec![
+                    ("Local (YouTube)", Ok(vec![b.clone()])),
+                    ("Fresh", Ok(vec![c.clone(), a.clone()])),
+                    ("Gone", Ok(vec![a.clone()])),
+                    ("Local", Ok(vec![c.clone()])),
+                ],
+                None,
+            ),
+        });
+        assert!(!app.syncing);
+        assert_eq!(ids(&app.store.playlists["Local (YouTube)"]), ["bbbbbbbbbbb"]);
+        assert_eq!(
+            ids(&app.store.playlists["Fresh"]),
+            ["ccccccccccc", "aaaaaaaaaaa"]
+        );
+        assert_eq!(ids(&app.store.playlists["Local"]), ["aaaaaaaaaaa"]);
+        assert!(!app.store.playlists.contains_key("Gone"));
+        assert!(app.is_linked("Fresh"));
+        assert!(app.status.as_ref().is_some_and(|s| s.level == Level::Info));
+
+        // a failed refresh keeps the songs already here
+        app.on_event(AppEvent::Synced {
+            manual: false,
+            report: report(
+                &[],
+                vec![
+                    ("Fresh", Err("private".into())),
+                    ("Local (YouTube)", Ok(vec![b.clone(), c.clone()])),
+                ],
+                Some("could not read your library"),
+            ),
+        });
+        assert_eq!(app.store.playlists["Fresh"].len(), 2);
+        assert_eq!(app.store.playlists["Local (YouTube)"].len(), 2);
+        assert!(app.sync_warned);
+        assert!(app.status.as_ref().is_some_and(
+            |s| s.level == Level::Error && s.text.contains("could not read your library")
+        ));
+        // ...and background syncs only complain once
+        app.status = None;
+        app.on_event(AppEvent::Synced {
+            manual: false,
+            report: report(&[], vec![("Fresh", Err("private".into()))], None),
+        });
+        assert!(app.status.is_none());
+
+        // deleting a synced playlist keeps it from coming back
+        app.delete_playlist("Fresh");
+        assert!(!app.is_linked("Fresh") && app.links.ignored.contains("PLfresh"));
+        app.on_event(AppEvent::Synced {
+            manual: true,
+            report: report(
+                &[("Fresh", "PLfresh")],
+                vec![("Fresh", Ok(vec![c.clone()]))],
+                None,
+            ),
+        });
+        assert!(!app.store.playlists.contains_key("Fresh") && !app.is_linked("Fresh"));
+
+        // unlinking keeps the songs
+        app.run_command("unlink local (youtube)");
+        assert!(app.links.is_empty());
+        assert!(app.links.ignored.contains("PLlinked"));
+        assert_eq!(app.store.playlists["Local (YouTube)"].len(), 2);
+        assert_eq!(Links::load(), app.links);
+        app.status = None;
+        app.run_command("unlink nothing");
+        assert!(app.status.as_ref().is_some_and(|s| s.level == Level::Error));
+
+        app.links = Links::default();
+        let _ = app.links.save();
+        app.sync_warned = false;
+        app.status = None;
+    }
+
     #[test]
     fn playlist_drill_in() {
         let dir = std::env::temp_dir().join(format!("drift-test-{}", std::process::id()));
@@ -3498,6 +4281,10 @@ mod tests {
             "Seek position is out of range"
         );
         app.play_state = PlayState::Stopped;
+
+        check_stream_cache(&mut app);
+        check_autoplay(&mut app);
+        check_playlist_sync(&mut app);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

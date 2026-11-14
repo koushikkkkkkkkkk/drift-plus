@@ -12,6 +12,7 @@ mod mpris;
 mod player;
 mod session;
 mod store;
+mod sync;
 mod sys;
 mod ui;
 mod ytmusic;

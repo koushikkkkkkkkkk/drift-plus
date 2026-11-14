@@ -53,6 +53,10 @@ pub enum Command {
     Album(Option<String>),
     PlaylistSearch(String),
     Lyrics,
+    Link(String, Option<String>),
+    Unlink(String),
+    SyncNow,
+    Autoplay(Option<bool>),
     Help,
 }
 
@@ -94,6 +98,10 @@ pub const COMMAND_NAMES: &[&str] = &[
     "album",
     "playlist",
     "lyrics",
+    "link",
+    "unlink",
+    "sync",
+    "autoplay",
     "help",
 ];
 
@@ -221,6 +229,27 @@ pub fn parse(line: &str) -> Result<Option<Command>, String> {
             PlaylistSearch(arg.to_string())
         }
         "lyrics" | "ly" => Lyrics,
+        "link" | "follow" => {
+            let (url, name) = match rest.split_once(char::is_whitespace) {
+                Some((url, name)) => (url, unquote(name)),
+                None => (rest, ""),
+            };
+            if url.is_empty() {
+                return Err("usage: :link <youtube / youtube music playlist URL> [name]".into());
+            }
+            Link(
+                unquote(url).to_string(),
+                (!name.is_empty()).then(|| name.to_string()),
+            )
+        }
+        "unlink" | "unfollow" => Unlink(name_arg(arg, "unlink")?),
+        "sync" => SyncNow,
+        "autoplay" | "auto" => Autoplay(match arg.to_ascii_lowercase().as_str() {
+            "" | "toggle" => None,
+            "on" | "yes" | "true" | "1" => Some(true),
+            "off" | "no" | "false" | "0" => Some(false),
+            other => return Err(format!(":autoplay expects on|off, got '{other}'")),
+        }),
         "help" | "h" => Help,
         other => return Err(format!("unknown command: :{other}  (try :help)")),
     };
@@ -316,6 +345,37 @@ mod tests {
         assert_eq!(parse("playlists"), Ok(Some(Command::ShowPlaylists)));
         assert_eq!(parse("history"), Ok(Some(Command::ShowRecent)));
         assert_eq!(parse("mostplayed"), Ok(Some(Command::ShowMostPlayed)));
+    }
+
+    #[test]
+    fn youtube_commands() {
+        let url = "https://music.youtube.com/playlist?list=PLabc";
+        assert_eq!(
+            parse(&format!("link {url}")),
+            Ok(Some(Command::Link(url.into(), None)))
+        );
+        assert_eq!(
+            parse(&format!(":link {url}  \"Road trip\"")),
+            Ok(Some(Command::Link(url.into(), Some("Road trip".into()))))
+        );
+        assert_eq!(
+            parse(&format!("follow {url} my mix")),
+            Ok(Some(Command::Link(url.into(), Some("my mix".into()))))
+        );
+        assert!(parse("link").is_err());
+        assert_eq!(
+            parse("unlink Road trip"),
+            Ok(Some(Command::Unlink("Road trip".into())))
+        );
+        assert!(parse("unlink").is_err());
+        assert_eq!(parse("sync"), Ok(Some(Command::SyncNow)));
+        assert_eq!(parse("autoplay"), Ok(Some(Command::Autoplay(None))));
+        assert_eq!(parse("autoplay ON"), Ok(Some(Command::Autoplay(Some(true)))));
+        assert_eq!(parse("auto off"), Ok(Some(Command::Autoplay(Some(false)))));
+        assert!(parse("autoplay maybe").is_err());
+        for name in ["link", "unlink", "sync", "autoplay"] {
+            assert!(COMMAND_NAMES.contains(&name));
+        }
     }
 
     #[test]

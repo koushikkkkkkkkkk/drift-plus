@@ -51,7 +51,7 @@ impl Default for Playback {
             volume: 80,
             shuffle: false,
             repeat: RepeatMode::Off,
-            autoplay: false,
+            autoplay: true,
             restore_session: true,
             seek_step: 5.0,
             volume_step: 5.0,
@@ -152,6 +152,37 @@ impl Audio {
     }
 }
 
+/* Everything that talks to YouTube Music beyond plain playback. */
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct Youtube {
+    pub sync: bool,
+    pub sync_minutes: u32,
+    pub library: bool,
+    pub prewarm: bool,
+    pub prewarm_selected: bool,
+}
+
+impl Default for Youtube {
+    fn default() -> Self {
+        Youtube {
+            sync: true,
+            sync_minutes: 30,
+            library: true,
+            prewarm: true,
+            prewarm_selected: true,
+        }
+    }
+}
+
+impl Youtube {
+    /* how often linked playlists are refreshed; None = only at startup and on :sync */
+    pub fn sync_interval(&self) -> Option<std::time::Duration> {
+        (self.sync && self.sync_minutes > 0)
+            .then(|| std::time::Duration::from_secs(u64::from(self.sync_minutes.max(5)) * 60))
+    }
+}
+
 fn default_accent() -> Color {
     Color::Cyan
 }
@@ -179,6 +210,7 @@ pub struct Config {
     pub ui: Ui,
     pub discord: Discord,
     pub audio: Audio,
+    pub youtube: Youtube,
     pub keys: HashMap<String, Keys>,
     #[serde(skip)]
     pub keymap: Keymap,
@@ -219,6 +251,7 @@ impl Config {
 volume = {volume}
 shuffle = {shuffle}
 repeat = \"{repeat}\"
+# When the queue or list runs out, keep going with songs similar to the last one.
 autoplay = {autoplay}
 restore_session = {restore}
 seek_step = {seek:?}
@@ -255,6 +288,21 @@ download_dir = {download_dir}
 # Examples: \"firefox\", \"chrome\", \"chromium\", \"brave\", \"edge\",
 # \"firefox:my-profile\". Empty means off. Close the browser if reading fails.
 cookies_from_browser = \"{cookies}\"
+
+[youtube]
+# Keep linked playlists (:link <playlist URL>) up to date with YouTube Music.
+sync = true
+# Minutes between refreshes while drift runs. 0 = only at startup and on :sync.
+sync_minutes = 30
+# With cookies_from_browser set, also link every playlist in your YouTube Music
+# library (and Liked Music) automatically.
+library = true
+# Look up the stream of the next song while the current one plays, so the
+# switch is instant.
+prewarm = true
+# Also look up the song under the cursor after resting on it for a moment, so
+# Enter starts it right away.
+prewarm_selected = true
 
 [keys]
 # Remap keys here. Each line sets an action to one key or a list of keys and
@@ -417,6 +465,35 @@ mod tests {
         assert_eq!(c.playback.seek_step, 5.0);
         assert!(c.playback.restore_session);
         assert!(!c.artist.popular_first);
+        assert!(c.playback.autoplay);
+        assert_eq!(c.youtube, Youtube::default());
+    }
+
+    #[test]
+    fn youtube_section() {
+        let c: Config = toml::from_str("").unwrap();
+        assert_eq!(c.youtube, Youtube::default());
+        assert_eq!(
+            c.youtube.sync_interval(),
+            Some(std::time::Duration::from_secs(30 * 60))
+        );
+        let c: Config = toml::from_str(
+            "[youtube]\nsync_minutes = 1\nlibrary = false\nprewarm_selected = false",
+        )
+        .unwrap();
+        assert!(c.youtube.sync && c.youtube.prewarm);
+        assert!(!c.youtube.library && !c.youtube.prewarm_selected);
+        // very short intervals are raised so YouTube isn't hammered
+        assert_eq!(
+            c.youtube.sync_interval(),
+            Some(std::time::Duration::from_secs(5 * 60))
+        );
+        let c: Config = toml::from_str("[youtube]\nsync_minutes = 0").unwrap();
+        assert_eq!(c.youtube.sync_interval(), None);
+        let c: Config = toml::from_str("[youtube]\nsync = false").unwrap();
+        assert_eq!(c.youtube.sync_interval(), None);
+        let c: Config = toml::from_str("[playback]\nautoplay = false").unwrap();
+        assert!(!c.playback.autoplay);
     }
 
     #[test]

@@ -574,7 +574,19 @@ fn ytdlp_search(query: &str) -> Result<Vec<Track>> {
 }
 
 fn ytdlp_entries(target: &str) -> Result<Vec<Track>> {
+    ytdlp_entries_with(target, None)
+}
+
+fn ytdlp_base(cookies: Option<&str>) -> Command {
     let mut cmd = Command::new("yt-dlp");
+    if let Some(browser) = cookies.map(str::trim).filter(|b| !b.is_empty()) {
+        cmd.arg("--cookies-from-browser").arg(browser);
+    }
+    cmd
+}
+
+fn ytdlp_entries_with(target: &str, cookies: Option<&str>) -> Result<Vec<Track>> {
+    let mut cmd = ytdlp_base(cookies);
     cmd.args([
         "--flat-playlist",
         "--dump-json",
@@ -600,6 +612,154 @@ fn ytdlp_entries(target: &str) -> Result<Vec<Track>> {
         bail!("yt-dlp failed: {}", last.trim());
     }
     Ok(tracks)
+}
+
+/* ---- playlists that stay in sync with YouTube Music ---- */
+
+const LIBRARY_FEED: &str = "https://www.youtube.com/feed/playlists";
+pub const LIKED_MUSIC: &str = "LM";
+
+fn is_playlist_id(id: &str) -> bool {
+    (2..=64).contains(&id.len())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+/// The playlist id in a YouTube / YouTube Music URL (`...?list=PL...`), or a
+/// bare id typed on its own.
+pub fn playlist_id(input: &str) -> Option<String> {
+    let input = input.trim();
+    let raw = match input.split_once("list=") {
+        Some((_, rest)) => rest.split(['&', '#']).next().unwrap_or(""),
+        None if input.contains(['/', '.', ' ']) => return None,
+        None => input,
+    };
+    /* browse ids carry a VL prefix that the playlist id itself doesn't have */
+    let id = match raw.strip_prefix("VL") {
+        Some(rest) if rest.len() > 2 => rest,
+        _ => raw,
+    };
+    /* 11 characters is a video id, not a playlist */
+    (is_playlist_id(id) && id.len() != 11).then(|| id.to_string())
+}
+
+pub fn playlist_url(id: &str) -> String {
+    format!("https://music.youtube.com/playlist?list={id}")
+}
+
+/// Every song of a playlist. Public playlists are read straight from YouTube
+/// Music; private ones (and Liked Music) go through yt-dlp with the browser
+/// cookies.
+pub fn playlist_tracks(id: &str, cookies: Option<&str>) -> Result<Vec<Track>, String> {
+    if !is_playlist_id(id) {
+        return Err("invalid playlist id".into());
+    }
+    let direct = if id == LIKED_MUSIC {
+        Err("needs an account".to_string())
+    } else {
+        browse_tracks(&format!("VL{id}"), "", "")
+    };
+    match direct {
+        Ok(tracks) if !tracks.is_empty() => Ok(tracks),
+        direct => match ytdlp_entries_with(&playlist_url(id), cookies) {
+            Ok(tracks) if !tracks.is_empty() => Ok(tracks),
+            Ok(_) => Err(match (direct, cookies) {
+                (Err(e), _) => e,
+                (Ok(_), Some(_)) => "playlist is empty".into(),
+                (Ok(_), None) => "playlist is empty or private".into(),
+            }),
+            Err(e) => Err(format!("{e:#}")),
+        },
+    }
+}
+
+/// The playlist's name on YouTube.
+pub fn playlist_title(id: &str, cookies: Option<&str>) -> Option<String> {
+    if !is_playlist_id(id) {
+        return None;
+    }
+    let mut cmd = ytdlp_base(cookies);
+    cmd.args([
+        "--flat-playlist",
+        "--playlist-items",
+        "1",
+        "--no-warnings",
+        "--socket-timeout",
+        "15",
+        "--print",
+        "%(playlist_title)s",
+    ])
+    .arg(playlist_url(id))
+    .stdin(Stdio::null());
+    let out = crate::sys::no_window(&mut cmd).output().ok()?;
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && *l != "NA")
+        .map(str::to_string)
+}
+
+/// The playlists in the signed-in account's library, as `(id, title)`.
+pub fn library(cookies: &str) -> Result<Vec<(String, String)>, String> {
+    let mut cmd = ytdlp_base(Some(cookies));
+    cmd.args([
+        "--flat-playlist",
+        "--dump-json",
+        "--no-warnings",
+        "--ignore-errors",
+        "--socket-timeout",
+        "15",
+    ])
+    .arg(LIBRARY_FEED)
+    .stdin(Stdio::null());
+    let out = crate::sys::no_window(&mut cmd)
+        .output()
+        .map_err(|e| format!("could not run yt-dlp ({e}); is it installed and on PATH?"))?;
+    let mut found = parse_library_lines(&String::from_utf8_lossy(&out.stdout));
+    if found.is_empty() && !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let last = stderr
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("unknown error");
+        return Err(format!(
+            "could not read your library: {}",
+            crate::player::ytdl_reason(last.trim().trim_start_matches("ERROR: "))
+        ));
+    }
+    if !found.iter().any(|(id, _)| id == LIKED_MUSIC) {
+        found.insert(0, (LIKED_MUSIC.to_string(), "Liked Music".to_string()));
+    }
+    Ok(found)
+}
+
+pub fn parse_library_lines(text: &str) -> Vec<(String, String)> {
+    let mut seen = std::collections::HashSet::new();
+    text.lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter_map(|v| {
+            let id = v
+                .get("id")
+                .and_then(Value::as_str)
+                .and_then(playlist_id)
+                .or_else(|| v.get("url").and_then(Value::as_str).and_then(playlist_id))?;
+            /* Watch Later and Liked videos aren't music playlists */
+            if id == "WL" || id == "LL" {
+                return None;
+            }
+            let title = v
+                .get("title")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .unwrap_or(&id)
+                .to_string();
+            Some((id, title))
+        })
+        .filter(|(id, _)| seen.insert(id.clone()))
+        .collect()
 }
 
 pub fn parse_ytdlp_lines(text: &str) -> Vec<Track> {
@@ -901,6 +1061,71 @@ not json
         })
         .unwrap();
         assert_eq!(tracks.len(), 2);
+    }
+
+    #[test]
+    fn reads_playlist_ids() {
+        for (input, id) in [
+            (
+                "https://music.youtube.com/playlist?list=PLabc_DEF-123&si=xyz",
+                "PLabc_DEF-123",
+            ),
+            (
+                "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=RDCLAK5uy_kX1#t=1",
+                "RDCLAK5uy_kX1",
+            ),
+            ("PLabc_DEF-123", "PLabc_DEF-123"),
+            ("VLPLabc_DEF-123", "PLabc_DEF-123"),
+            (" LM ", "LM"),
+        ] {
+            assert_eq!(playlist_id(input).as_deref(), Some(id), "{input}");
+        }
+        for bad in [
+            "",
+            "https://music.youtube.com/watch?v=dQw4w9WgXcQ",
+            "dQw4w9WgXcQ",
+            "my playlist",
+            "https://example.com/?list=bad%20id",
+            "list=",
+        ] {
+            assert_eq!(playlist_id(bad), None, "{bad}");
+        }
+        assert_eq!(
+            playlist_url("PLx"),
+            "https://music.youtube.com/playlist?list=PLx"
+        );
+        assert!(playlist_tracks("../etc", None).is_err());
+    }
+
+    #[test]
+    fn parses_library_feed() {
+        let text = concat!(
+            r#"{"_type":"url","id":"PLaaaaaaaaaaaaaaaa","title":" Road trip ","url":"https://www.youtube.com/playlist?list=PLaaaaaaaaaaaaaaaa"}"#,
+            "\n",
+            r#"{"_type":"url","id":"WL","title":"Watch later"}"#,
+            "\n",
+            r#"{"_type":"url","id":"LL","title":"Liked videos"}"#,
+            "\n",
+            "not json\n",
+            r#"{"_type":"url","title":"From url","url":"https://www.youtube.com/playlist?list=PLbbbbbbbbbbbbbbbb"}"#,
+            "\n",
+            r#"{"_type":"url","id":"PLaaaaaaaaaaaaaaaa","title":"Duplicate"}"#,
+            "\n",
+            r#"{"_type":"url","id":"PLcccccccccccccccc"}"#,
+            "\n",
+            r#"{"_type":"url","id":"dQw4w9WgXcQ","title":"a video"}"#,
+        );
+        assert_eq!(
+            parse_library_lines(text),
+            vec![
+                ("PLaaaaaaaaaaaaaaaa".to_string(), "Road trip".to_string()),
+                ("PLbbbbbbbbbbbbbbbb".to_string(), "From url".to_string()),
+                (
+                    "PLcccccccccccccccc".to_string(),
+                    "PLcccccccccccccccc".to_string()
+                ),
+            ]
+        );
     }
 
     #[test]

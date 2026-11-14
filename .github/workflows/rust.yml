@@ -2,7 +2,7 @@ name: Rust
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "arena/**" ]
   pull_request:
     branches: [ "main" ]
 
@@ -17,6 +17,12 @@ jobs:
     steps:
     - uses: actions/checkout@v7
     - name: Build
-      run: cargo build --verbose
+      run: cargo build
     - name: Run tests
-      run: cargo test --verbose
+      run: cargo test
+    - name: Build release binary
+      run: cargo build --release
+    - uses: actions/upload-artifact@v7
+      with:
+        name: drift-plus-linux-x86_64
+        path: target/release/drift
