@@ -1,0 +1,39 @@
+name: Rust
+
+on:
+  push:
+    branches: [ "main", "arena/**" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v7
+    - name: Build
+      run: cargo build
+      env:
+        RUSTFLAGS: -D warnings
+    - name: Run tests
+      shell: bash
+      run: |
+        set -o pipefail
+        if ! cargo test --color never 2>&1 | tee test.log; then
+          # show the reason next to the run, not only in the log
+          grep -E -A 12 "^error|panicked at|^test .* FAILED" test.log | head -n 60 | while IFS= read -r line; do
+            echo "::error::$line"
+          done
+          exit 1
+        fi
+    - name: Build release binary
+      run: cargo build --release
+    - uses: actions/upload-artifact@v7
+      with:
+        name: drift-plus-linux-x86_64
+        path: target/release/drift-plus
